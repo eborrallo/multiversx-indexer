@@ -1,6 +1,12 @@
-# multiverse-indexer
+# multiversx-indexer
 
 MultiversX event indexer with [Kepler](https://projectx.mx) integration, Drizzle schema sync, and real-time backfill.
+
+## Installation
+
+```bash
+npm install multiversx-indexer
+```
 
 ## Features
 
@@ -15,9 +21,9 @@ MultiversX event indexer with [Kepler](https://projectx.mx) integration, Drizzle
 ### Create a new project
 
 ```bash
-bunx multiverse-indexer init
+npx multiversx-indexer init
 # or in a subdirectory
-bunx multiverse-indexer init ./my-indexer
+npx multiversx-indexer init ./my-indexer
 ```
 
 This scaffolds:
@@ -94,6 +100,21 @@ export default defineConfig({
   healthPort: 42069,
 });
 ```
+
+## Endpoints
+
+When `healthPort` is set in your config, the indexer starts an HTTP server (default: port 42069) with the following endpoints:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | **Liveness probe** — Returns `{ healthy, phase }`. Responds with 200 when the indexer is running, 503 otherwise. Use for Kubernetes liveness checks. |
+| `/ready` | GET | **Readiness probe** — Returns `{ ready, phase, eventsProcessed, uptimeMs }`. Responds with 200 when the indexer has finished backfill and is processing live events, 503 during startup. Use for Kubernetes readiness checks. |
+| `/graphql` | GET/POST | **GraphQL API** — Auto-generated from your Drizzle schema. Exposes queries for each table (e.g. `rewardEvents`, `rewardEvent`). Includes a GraphiQL playground when opened in a browser. Only available when `schema` and `schemaName` are configured. |
+
+**Example responses:**
+
+- `/health` → `{ "healthy": true, "phase": "realtime" }`
+- `/ready` → `{ "ready": true, "phase": "realtime", "eventsProcessed": 1234, "uptimeMs": 45000 }`
 
 ## Event handlers
 
