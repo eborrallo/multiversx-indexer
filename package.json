@@ -1,0 +1,75 @@
+{
+  "name": "multiverse-indexer",
+  "version": "0.1.0",
+  "description": "MultiversX event indexer with Kepler integration, Drizzle schema sync, and real-time backfill",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "templates",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "multiverse-indexer": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "build:watch": "tsup --watch",
+    "prepare": "bun run build",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write ."
+  },
+  "keywords": [
+    "multiversx",
+    "indexer",
+    "kepler",
+    "elrond",
+    "blockchain",
+    "drizzle"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/eborrallo/multiversx-indexer.git"
+  },
+  "homepage": "https://github.com/eborrallo/multiversx-indexer#readme",
+  "bugs": {
+    "url": "https://github.com/eborrallo/multiversx-indexer/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.3.15",
+    "drizzle-orm": "^0.45.1",
+    "graphql": "^16.9.0",
+    "graphql-yoga": "^5.13.4",
+    "postgres": "^3.4.8"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@biomejs/biome": "^2.4.0",
+    "drizzle-kit": "^0.31.9",
+    "tsup": "^8.0.0",
+    "typescript": "^5"
+  },
+  "peerDependencies": {
+    "drizzle-orm": "^0.45.1",
+    "typescript": "^5"
+  }
+}

@@ -1,0 +1,215 @@
+import { asc, desc, eq, getTableColumns, getTableName, type SQL } from "drizzle-orm";
+import type { Column } from "drizzle-orm/column";
+import type { Table } from "drizzle-orm/table";
+import {
+  GraphQLBoolean,
+  type GraphQLFieldConfigMap,
+  GraphQLFloat,
+  GraphQLID,
+  GraphQLInt,
+  GraphQLList,
+  GraphQLNonNull,
+  GraphQLObjectType,
+  type GraphQLOutputType,
+  GraphQLSchema,
+  GraphQLString,
+} from "graphql";
+import { createYoga } from "graphql-yoga";
+import type { IndexerDb } from "./db";
+
+function isPgColumn(col: unknown): col is Column & { getSQLType(): string } {
+  if (col == null || typeof col !== "object") return false;
+  const c = col as Record<string, unknown>;
+  return typeof c.getSQLType === "function";
+}
+
+function isDrizzleTable(obj: unknown): obj is Table {
+  if (obj == null || typeof obj !== "object") return false;
+  try {
+    getTableName(obj as Parameters<typeof getTableName>[0]);
+    getTableColumns(obj as Parameters<typeof getTableColumns>[0]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** snake_case to camelCase for query names (e.g. reward_events -> rewardEvents) */
+function tableNameToQueryName(tableName: string): string {
+  const parts = tableName.split("_");
+  return (
+    parts[0]?.toLowerCase() +
+    parts
+      .slice(1)
+      .map((s) => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase())
+      .join("")
+  );
+}
+
+/** Plural list query name (reward_events -> rewardEvents) */
+function listQueryName(tableName: string): string {
+  return tableNameToQueryName(tableName);
+}
+
+/** Singular query name (reward_events -> rewardEvent) */
+function singleQueryName(tableName: string): string {
+  const camel = tableNameToQueryName(tableName);
+  return camel.endsWith("s") ? camel.slice(0, -1) : camel;
+}
+
+function sqlTypeToGraphQL(sqlType: string): GraphQLOutputType {
+  const lower = sqlType.toLowerCase();
+  if (lower.includes("int") && !lower.includes("bigint")) return GraphQLInt;
+  if (lower.includes("bigint") || lower.includes("numeric") || lower.includes("decimal"))
+    return GraphQLString;
+  if (lower.includes("float") || lower.includes("double") || lower.includes("real"))
+    return GraphQLFloat;
+  if (lower === "boolean" || lower === "bool") return GraphQLBoolean;
+  return GraphQLString;
+}
+
+export interface GraphQLContext {
+  db: IndexerDb;
+}
+
+interface TableMeta {
+  table: Table;
+  tableName: string;
+  typeName: string;
+  listQueryName: string;
+  singleQueryName: string;
+  pkColumn: Column | null;
+  pkColumnKey: string | null;
+  columns: Array<{ columnKey: string; column: Column; gqlType: GraphQLOutputType }>;
+}
+
+function collectTableMeta(schema: Record<string, unknown>): TableMeta[] {
+  const result: TableMeta[] = [];
+  for (const [_, value] of Object.entries(schema)) {
+    if (!isDrizzleTable(value)) continue;
+    const table = value as Table;
+    const tableName = getTableName(table as Parameters<typeof getTableName>[0]);
+    const columnsMap = getTableColumns(table as Parameters<typeof getTableColumns>[0]);
+    let pkColumn: Column | null = null;
+    let pkColumnKey: string | null = null;
+    const columns: Array<{ columnKey: string; column: Column; gqlType: GraphQLOutputType }> = [];
+    for (const [colKey, col] of Object.entries(columnsMap)) {
+      if (!isPgColumn(col)) continue;
+      const sqlType = col.getSQLType();
+      columns.push({
+        columnKey: colKey,
+        column: col as Column,
+        gqlType: sqlTypeToGraphQL(sqlType),
+      });
+      if ((col as Column).primary) {
+        pkColumn = col as Column;
+        pkColumnKey = colKey;
+      }
+    }
+    result.push({
+      table,
+      tableName,
+      typeName:
+        singleQueryName(tableName).charAt(0).toUpperCase() + singleQueryName(tableName).slice(1),
+      listQueryName: listQueryName(tableName),
+      singleQueryName: singleQueryName(tableName),
+      pkColumn: pkColumn ?? null,
+      pkColumnKey,
+      columns,
+    });
+  }
+  return result;
+}
+
+export function buildGraphQLSchema(
+  schema: Record<string, unknown>,
+  _schemaName: string,
+): GraphQLSchema | null {
+  const tables = collectTableMeta(schema);
+  if (tables.length === 0) return null;
+
+  const queryFields: GraphQLFieldConfigMap<unknown, GraphQLContext> = {};
+
+  for (const meta of tables) {
+    const fields: GraphQLFieldConfigMap<Record<string, unknown>, GraphQLContext> = {};
+    for (const { columnKey, gqlType } of meta.columns) {
+      fields[columnKey] = {
+        type: gqlType,
+        resolve: (parent: Record<string, unknown>) => parent[columnKey],
+      };
+    }
+    const objectType = new GraphQLObjectType({
+      name: meta.typeName,
+      fields,
+    });
+
+    queryFields[meta.listQueryName] = {
+      type: new GraphQLList(objectType),
+      args: {
+        limit: { type: GraphQLInt, defaultValue: 100 },
+        orderBy: { type: GraphQLString },
+      },
+      resolve: async (_source, args, context) => {
+        const limit = Math.min(Number(args.limit) || 100, 1000);
+        let query = context.db.select().from(meta.table).limit(limit);
+        const orderByStr = args.orderBy as string | undefined;
+        if (orderByStr && typeof orderByStr === "string") {
+          const lastUnderscore = orderByStr.lastIndexOf("_");
+          const field = lastUnderscore > 0 ? orderByStr.slice(0, lastUnderscore) : orderByStr;
+          const dir = lastUnderscore > 0 ? orderByStr.slice(lastUnderscore + 1) : "asc";
+          const col = meta.columns.find((c) => c.columnKey === field);
+          if (col && (dir === "asc" || dir === "desc")) {
+            const colRef = meta.table[col.columnKey as keyof typeof meta.table];
+            query = query.orderBy(
+              dir === "desc" ? desc(colRef as never) : asc(colRef as never),
+            ) as typeof query;
+          }
+        }
+        const rows = await query;
+        return rows as Record<string, unknown>[];
+      },
+    };
+
+    if (meta.pkColumn && meta.pkColumnKey) {
+      queryFields[meta.singleQueryName] = {
+        type: objectType,
+        args: {
+          id: { type: new GraphQLNonNull(GraphQLID) },
+        },
+        resolve: async (_source, args, context) => {
+          const colRef = meta.table[meta.pkColumnKey as keyof typeof meta.table];
+          const rows = await context.db
+            .select()
+            .from(meta.table)
+            .where(eq(colRef as never, args.id as string) as SQL)
+            .limit(1);
+          return (rows[0] ?? null) as Record<string, unknown> | null;
+        },
+      };
+    }
+  }
+
+  const queryType = new GraphQLObjectType({
+    name: "Query",
+    fields: queryFields,
+  });
+
+  return new GraphQLSchema({ query: queryType });
+}
+
+export function createGraphQLHandler(options: {
+  db: IndexerDb;
+  schema: Record<string, unknown>;
+  schemaName: string;
+}): ((request: Request) => Promise<Response>) | null {
+  const graphqlSchema = buildGraphQLSchema(options.schema, options.schemaName);
+  if (!graphqlSchema) return null;
+
+  const yoga = createYoga({
+    schema: graphqlSchema,
+    graphiql: true,
+    context: (): GraphQLContext => ({ db: options.db }),
+  });
+
+  return (request: Request): Promise<Response> => Promise.resolve(yoga.fetch(request));
+}
