@@ -22,9 +22,83 @@ export class IndexerLogger implements Logger {
 
 export type IndexerDb = PgDatabase<PgQueryResultHKT, Record<string, never>>;
 
+/** Redacts password from a postgres URL for safe logging. */
+export function maskDbUrl(url: string): string {
+  return url.replace(/^(postgres(?:ql)?:\/\/[^:]+:)([^@]+)(@)/, "$1***$3");
+}
+
 export interface IndexerDatabase {
   db: IndexerDb;
   close(): Promise<void>;
+}
+
+/**
+ * Parses PostgreSQL URLs that use host= in query params for Unix sockets.
+ * The postgres package fails to parse these (ERR_INVALID_URL) because the host
+ * is empty in the URL and the socket path is in ?host=/path/to/socket
+ */
+export function parseUnixSocketUrl(url: string): {
+  host: string;
+  database: string;
+  username: string;
+  password: string;
+  port?: number;
+} | null {
+  try {
+    // Primary: strict regex for user:password@/database?host=/path (password optional for Cloud SQL IAM etc.)
+    const match = url.match(/^postgres(?:ql)?:\/\/([^:@]+)(?::([^@]*))?@\/([^?]+)(?:\?(.+))?$/);
+    if (match) {
+      const [, user, password, database, query] = match;
+      if (user && database) {
+        const hostMatch = query?.match(/host=([^&]+)/);
+        const hostRaw = hostMatch?.[1];
+        const host = hostRaw ? decodeURIComponent(hostRaw).replace(/^["']|["']$/g, "") : null;
+        if (host?.startsWith("/")) {
+          const portMatch = query?.match(/port=(\d+)/);
+          const portRaw = portMatch?.[1];
+          const port = portRaw ? parseInt(portRaw, 10) : undefined;
+          const pass = password ?? "";
+          return {
+            host,
+            database: decodeURIComponent(database),
+            username: decodeURIComponent(user),
+            password: pass ? decodeURIComponent(pass) : "",
+            port,
+          };
+        }
+      }
+    }
+
+    // Fallback: URL has @/ (empty host) and host= with socket path — postgres would fail on this
+    if (url.includes("@/") && /host=\/[^&\s]+/.test(url)) {
+      const authEnd = url.indexOf("@/");
+      const authPart = url.slice(url.indexOf("://") + 3, authEnd);
+      const colonIdx = authPart.indexOf(":");
+      const username =
+        colonIdx > 0
+          ? decodeURIComponent(authPart.slice(0, colonIdx))
+          : decodeURIComponent(authPart);
+      const password = colonIdx > 0 ? decodeURIComponent(authPart.slice(colonIdx + 1)) : "";
+      if (username) {
+        const afterSlash = url.slice(authEnd + 2);
+        const qIdx = afterSlash.indexOf("?");
+        const database = decodeURIComponent(qIdx >= 0 ? afterSlash.slice(0, qIdx) : afterSlash);
+        const query = qIdx >= 0 ? afterSlash.slice(qIdx + 1) : "";
+        const hostMatch = query.match(/host=([^&]+)/);
+        const hostRaw = hostMatch?.[1];
+        const host = hostRaw ? decodeURIComponent(hostRaw).replace(/^["']|["']$/g, "") : null;
+        if (host?.startsWith("/")) {
+          const portMatch = query.match(/port=(\d+)/);
+          const portRaw = portMatch?.[1];
+          const port = portRaw ? parseInt(portRaw, 10) : undefined;
+          return { host, database, username, password, port };
+        }
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 export async function createDatabase(opts: {
@@ -43,7 +117,18 @@ export async function createDatabase(opts: {
   if (opts.url) {
     const pgModule = await import("postgres");
     const pgDrizzle = await import("drizzle-orm/postgres-js");
-    const client = pgModule.default(opts.url, { onnotice });
+    const pgOptions = { onnotice };
+    const socketOpts = parseUnixSocketUrl(opts.url);
+    const client = socketOpts
+      ? pgModule.default({
+          host: socketOpts.host,
+          database: socketOpts.database,
+          username: socketOpts.username,
+          password: socketOpts.password,
+          port: socketOpts.port,
+          ...pgOptions,
+        })
+      : pgModule.default(opts.url, pgOptions);
     const db = pgDrizzle.drizzle(client, { logger });
     return {
       db: db as unknown as IndexerDb,
