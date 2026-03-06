@@ -25,6 +25,6 @@
   },
   "assist": { "actions": { "source": { "organizeImports": "on" } } },
   "files": {
-    "includes": ["**", "!**/node_modules", "!**/dist", "!**/templates", "!**/*.config.ts"]
+    "includes": ["**", "!**/node_modules", "!**/dist", "!**/templates", "!**/*.config.ts", "!package.json"]
   }
 }
