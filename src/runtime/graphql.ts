@@ -1,11 +1,24 @@
-import { asc, desc, eq, getTableColumns, getTableName, type SQL } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  getTableColumns,
+  getTableName,
+  ilike,
+  inArray,
+  type SQL,
+} from "drizzle-orm";
 import type { Column } from "drizzle-orm/column";
 import type { Table } from "drizzle-orm/table";
+import type { GraphQLInputType } from "graphql";
 import {
   GraphQLBoolean,
+  GraphQLEnumType,
   type GraphQLFieldConfigMap,
   GraphQLFloat,
   GraphQLID,
+  GraphQLInputObjectType,
   GraphQLInt,
   GraphQLList,
   GraphQLNonNull,
@@ -67,6 +80,22 @@ function sqlTypeToGraphQL(sqlType: string): GraphQLOutputType {
   if (lower === "boolean" || lower === "bool") return GraphQLBoolean;
   return GraphQLString;
 }
+
+/** camelCase to SCREAMING_SNAKE_CASE for enum values */
+function toEnumValue(key: string): string {
+  return key
+    .replace(/([A-Z])/g, "_$1")
+    .replace(/^_/, "")
+    .toUpperCase();
+}
+
+const orderDirectionEnum = new GraphQLEnumType({
+  name: "OrderDirection",
+  values: {
+    ASC: { value: "asc" },
+    DESC: { value: "desc" },
+  },
+});
 
 export interface GraphQLContext {
   db: IndexerDb;
@@ -143,28 +172,87 @@ export function buildGraphQLSchema(
       fields,
     });
 
+    const orderByFieldEnum = new GraphQLEnumType({
+      name: `${meta.typeName}OrderByField`,
+      values: Object.fromEntries(
+        meta.columns.map((c) => [toEnumValue(c.columnKey), { value: c.columnKey }]),
+      ),
+    });
+
+    const orderByInput = new GraphQLInputObjectType({
+      name: `${meta.typeName}OrderBy`,
+      fields: {
+        field: { type: new GraphQLNonNull(orderByFieldEnum) },
+        direction: { type: orderDirectionEnum, defaultValue: "asc" },
+      },
+    });
+
+    const whereInputFields: Record<string, { type: GraphQLInputType }> = {};
+    for (const { columnKey, gqlType } of meta.columns) {
+      const scalar: GraphQLInputType =
+        gqlType === GraphQLInt || gqlType === GraphQLFloat || gqlType === GraphQLBoolean
+          ? (gqlType as GraphQLInputType)
+          : GraphQLString;
+      whereInputFields[`${columnKey}_eq`] = { type: scalar };
+      whereInputFields[`${columnKey}_in`] = { type: new GraphQLList(new GraphQLNonNull(scalar)) };
+      if (gqlType === GraphQLString) {
+        whereInputFields[`${columnKey}_contains`] = { type: GraphQLString };
+      }
+    }
+    const whereInput = new GraphQLInputObjectType({
+      name: `${meta.typeName}Where`,
+      fields: whereInputFields,
+    });
+
     queryFields[meta.listQueryName] = {
       type: new GraphQLList(objectType),
       args: {
         limit: { type: GraphQLInt, defaultValue: 100 },
-        orderBy: { type: GraphQLString },
+        orderBy: { type: orderByInput },
+        where: { type: whereInput },
       },
       resolve: async (_source, args, context) => {
         const limit = Math.min(Number(args.limit) || 100, 1000);
         let query = context.db.select().from(meta.table).limit(limit);
-        const orderByStr = args.orderBy as string | undefined;
-        if (orderByStr && typeof orderByStr === "string") {
-          const lastUnderscore = orderByStr.lastIndexOf("_");
-          const field = lastUnderscore > 0 ? orderByStr.slice(0, lastUnderscore) : orderByStr;
-          const dir = lastUnderscore > 0 ? orderByStr.slice(lastUnderscore + 1) : "asc";
-          const col = meta.columns.find((c) => c.columnKey === field);
-          if (col && (dir === "asc" || dir === "desc")) {
+
+        const orderByArg = args.orderBy as { field?: string; direction?: string } | undefined;
+        if (orderByArg?.field) {
+          const col = meta.columns.find((c) => c.columnKey === orderByArg.field);
+          if (col) {
+            const dir = orderByArg.direction === "desc" ? "desc" : "asc";
             const colRef = meta.table[col.columnKey as keyof typeof meta.table];
             query = query.orderBy(
               dir === "desc" ? desc(colRef as never) : asc(colRef as never),
             ) as typeof query;
           }
         }
+
+        const whereArg = args.where as Record<string, unknown> | undefined;
+        if (whereArg && typeof whereArg === "object") {
+          const conditions: SQL[] = [];
+          for (const [key, value] of Object.entries(whereArg)) {
+            if (value == null) continue;
+            const eqMatch = key.match(/^(.+)_eq$/);
+            const inMatch = key.match(/^(.+)_in$/);
+            const containsMatch = key.match(/^(.+)_contains$/);
+            const colKey = eqMatch?.[1] ?? inMatch?.[1] ?? containsMatch?.[1];
+            if (!colKey) continue;
+            const col = meta.columns.find((c) => c.columnKey === colKey);
+            if (!col) continue;
+            const colRef = meta.table[colKey as keyof typeof meta.table];
+            if (eqMatch) {
+              conditions.push(eq(colRef as never, value) as SQL);
+            } else if (inMatch && Array.isArray(value)) {
+              conditions.push(inArray(colRef as never, value) as SQL);
+            } else if (containsMatch && typeof value === "string") {
+              conditions.push(ilike(colRef as never, `%${value}%`) as SQL);
+            }
+          }
+          if (conditions.length > 0) {
+            query = query.where(and(...conditions) as SQL) as typeof query;
+          }
+        }
+
         const rows = await query;
         return rows as Record<string, unknown>[];
       },
