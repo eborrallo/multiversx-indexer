@@ -14,6 +14,21 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Bump version from release tag
+        run: |
+          node -e "
+            const fs = require('fs');
+            const tag = process.env.TAG_NAME;
+            const version = tag.startsWith('v') ? tag.slice(1) : tag;
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = version;
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          "
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
