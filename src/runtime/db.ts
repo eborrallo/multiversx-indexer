@@ -22,9 +22,53 @@ export class IndexerLogger implements Logger {
 
 export type IndexerDb = PgDatabase<PgQueryResultHKT, Record<string, never>>;
 
+/** Redacts password from a postgres URL for safe logging. */
+export function maskDbUrl(url: string): string {
+  return url.replace(/^(postgres(?:ql)?:\/\/[^:]+:)([^@]+)(@)/, "$1***$3");
+}
+
 export interface IndexerDatabase {
   db: IndexerDb;
   close(): Promise<void>;
+}
+
+/**
+ * Parses PostgreSQL URLs that use host= in query params for Unix sockets.
+ * The postgres package fails to parse these (ERR_INVALID_URL) because the host
+ * is empty in the URL and the socket path is in ?host=/path/to/socket
+ */
+function parseUnixSocketUrl(url: string): {
+  host: string;
+  database: string;
+  username: string;
+  password: string;
+  port?: number;
+} | null {
+  try {
+    const match = url.match(/^postgres(?:ql)?:\/\/([^:]+):([^@]+)@\/([^?]+)(?:\?(.+))?$/);
+    if (!match) return null;
+    const user = match[1];
+    const password = match[2];
+    const database = match[3];
+    const query = match[4];
+    if (!user || !password || !database) return null;
+    const hostMatch = query?.match(/host=([^&]+)/);
+    const hostRaw = hostMatch?.[1];
+    const host = hostRaw ? decodeURIComponent(hostRaw) : null;
+    if (!host || !host.startsWith("/")) return null;
+    const portMatch = query?.match(/port=(\d+)/);
+    const portRaw = portMatch?.[1];
+    const port = portRaw ? parseInt(portRaw, 10) : undefined;
+    return {
+      host,
+      database: decodeURIComponent(database),
+      username: decodeURIComponent(user),
+      password: decodeURIComponent(password),
+      port,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function createDatabase(opts: {
@@ -43,7 +87,18 @@ export async function createDatabase(opts: {
   if (opts.url) {
     const pgModule = await import("postgres");
     const pgDrizzle = await import("drizzle-orm/postgres-js");
-    const client = pgModule.default(opts.url, { onnotice });
+    const pgOptions = { onnotice };
+    const socketOpts = parseUnixSocketUrl(opts.url);
+    const client = socketOpts
+      ? pgModule.default({
+          host: socketOpts.host,
+          database: socketOpts.database,
+          username: socketOpts.username,
+          password: socketOpts.password,
+          port: socketOpts.port,
+          ...pgOptions,
+        })
+      : pgModule.default(opts.url, pgOptions);
     const db = pgDrizzle.drizzle(client, { logger });
     return {
       db: db as unknown as IndexerDb,

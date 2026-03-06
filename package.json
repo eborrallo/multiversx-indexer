@@ -1,6 +1,6 @@
 {
   "name": "multiversx-indexer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "MultiversX event indexer with Kepler integration, Drizzle schema sync, and real-time backfill",
   "type": "module",
   "main": "dist/index.js",
