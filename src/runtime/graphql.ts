@@ -28,6 +28,11 @@ import {
   GraphQLString,
 } from "graphql";
 import { createYoga } from "graphql-yoga";
+import {
+  GRAPHQL_DEFAULT_LIMIT,
+  GRAPHQL_DEFAULT_ORDER_DIRECTION,
+  GRAPHQL_MAX_LIMIT,
+} from "../constants";
 import type { IndexerDb } from "./db";
 
 function isPgColumn(col: unknown): col is Column & { getSQLType(): string } {
@@ -183,7 +188,7 @@ export function buildGraphQLSchema(
       name: `${meta.typeName}OrderBy`,
       fields: {
         field: { type: new GraphQLNonNull(orderByFieldEnum) },
-        direction: { type: orderDirectionEnum, defaultValue: "asc" },
+        direction: { type: orderDirectionEnum, defaultValue: GRAPHQL_DEFAULT_ORDER_DIRECTION },
       },
     });
 
@@ -212,7 +217,7 @@ export function buildGraphQLSchema(
         where: { type: whereInput },
       },
       resolve: async (_source, args, context) => {
-        const limit = Math.min(Number(args.limit) || 100, 1000);
+        const limit = Math.min(Number(args.limit) || GRAPHQL_DEFAULT_LIMIT, GRAPHQL_MAX_LIMIT);
         let query = context.db.select().from(meta.table).limit(limit);
 
         const orderByArg = args.orderBy as { field?: string; direction?: string } | undefined;

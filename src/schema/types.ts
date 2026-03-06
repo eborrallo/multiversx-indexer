@@ -34,3 +34,18 @@ export function base64ToUtf8(b64: string): string {
 export function utf8ToBase64(str: string): string {
   return Buffer.from(str, "utf8").toString("base64");
 }
+
+/** UTF-8 string to hex (for events index topics). */
+export function utf8ToHex(str: string): string {
+  return Buffer.from(str, "utf8").toString("hex");
+}
+
+/** Hex to UTF-8 string. */
+export function hexToUtf8(hex: string): string {
+  if (!hex) return "";
+  try {
+    return Buffer.from(hex, "hex").toString("utf8");
+  } catch {
+    return "";
+  }
+}

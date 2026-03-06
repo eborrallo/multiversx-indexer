@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { Logger } from "drizzle-orm/logger";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
+import { DEFAULT_DATA_DIR } from "../constants";
 
 export const INTERNAL_SCHEMA = "multiverse_internal";
 
@@ -191,7 +192,7 @@ export async function createDatabase(opts: {
 
   const { PGlite } = await import("@electric-sql/pglite");
   const pgliteDrizzle = await import("drizzle-orm/pglite");
-  const dataDir = opts.dataDir ?? "./indexer-data";
+  const dataDir = opts.dataDir ?? DEFAULT_DATA_DIR;
   const client = new PGlite(dataDir);
   const db = pgliteDrizzle.drizzle(client, { logger });
   return {

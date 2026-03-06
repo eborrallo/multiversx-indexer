@@ -1,4 +1,11 @@
 import type { HandlerContext, IndexerConfig, KeplerSourceConfig } from "../config";
+import {
+  DEFAULT_DATA_DIR,
+  DEFAULT_SCHEMA_NAME,
+  EMPTY_SCHEMA,
+  EMPTY_SOURCE_ID,
+  HANDLER_BATCH_SIZE,
+} from "../constants";
 import type { MultiversXEvent } from "../schema/types";
 import { createBatchedDb, flushInsertBuffer } from "./batched-db";
 import type { ChainReader } from "./chain-client";
@@ -6,7 +13,7 @@ import { createChainClientsForConfig } from "./chain-client";
 import type { IndexerDb } from "./db";
 import { bootstrapInternalSchema, createDatabase, maskDbUrl } from "./db";
 import { getDeploymentBlock, getLatestBlock } from "./deployment-block";
-import { KeplerEsFetcher, KeplerWsClient } from "./fetcher";
+import { KeplerEsFetcher } from "./elasticsearch-client";
 import { addProcessed, setHealthy, setPhase, setReady, startHealthServer } from "./health";
 import { syncUserSchema } from "./schema-sync";
 import {
@@ -18,8 +25,7 @@ import {
   readRawEventsChunked,
   updateCheckpoint,
 } from "./store";
-
-const HANDLER_BATCH_SIZE = 1500;
+import { KeplerWsClient } from "./websocket-client";
 
 function log(msg: string) {
   console.log(msg);
@@ -28,7 +34,12 @@ function log(msg: string) {
 // ---------------------------------------------------------------------------
 // Backfill raw events from Kepler ES (delta only)
 // ---------------------------------------------------------------------------
-async function phase1Backfill(config: IndexerConfig, db: IndexerDb): Promise<void> {
+async function phase1Backfill(
+  config: IndexerConfig,
+  db: IndexerDb,
+  chainClients: Map<string, ChainReader>,
+  options?: { isDev?: boolean },
+): Promise<void> {
   setPhase("backfill");
   log("Backfill raw events");
 
@@ -122,6 +133,23 @@ async function phase1Backfill(config: IndexerConfig, db: IndexerDb): Promise<voi
       // --- fetch loop ---
       let totalFetched = 0;
       const fetchStart = Date.now();
+      const useProgressBar =
+        (options?.isDev ?? false) &&
+        process.stdout.isTTY &&
+        apiRemaining != null &&
+        apiRemaining > 0;
+      const barWidth = 24;
+
+      function renderBackfillBar() {
+        if (!useProgressBar || apiRemaining == null) return;
+        const pct = Math.min(1, totalFetched / apiRemaining);
+        const filled = Math.round(barWidth * pct);
+        const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
+        const elapsed = ((Date.now() - fetchStart) / 1000).toFixed(1);
+        process.stdout.write(
+          `\r  │ [${bar}] ${totalFetched.toLocaleString()}/~${apiRemaining.toLocaleString()} (${Math.round(pct * 100)}%) — ${elapsed}s\x1b[K`,
+        );
+      }
 
       for await (const batch of fetcher.fetchAllEvents(
         [contract],
@@ -145,22 +173,28 @@ async function phase1Backfill(config: IndexerConfig, db: IndexerDb): Promise<voi
           );
         }
 
-        const shouldLog =
-          apiRemaining != null && apiRemaining > 0
-            ? totalFetched % 10_000 === 0 || totalFetched >= apiRemaining
-            : totalFetched % 10_000 === 0;
+        if (useProgressBar) {
+          renderBackfillBar();
+        } else {
+          const shouldLog =
+            apiRemaining != null && apiRemaining > 0
+              ? totalFetched % 10_000 === 0 || totalFetched >= apiRemaining
+              : totalFetched % 10_000 === 0;
 
-        if (shouldLog) {
-          if (apiRemaining != null && apiRemaining > 0) {
-            const pct = Math.min(100, Math.round((totalFetched / apiRemaining) * 100));
-            log(
-              `  │ Fetching... ${totalFetched.toLocaleString()} / ~${apiRemaining.toLocaleString()} (${pct}%)`,
-            );
-          } else {
-            log(`  │ Fetching... ${totalFetched.toLocaleString()} events`);
+          if (shouldLog) {
+            if (apiRemaining != null && apiRemaining > 0) {
+              const pct = Math.min(100, Math.round((totalFetched / apiRemaining) * 100));
+              log(
+                `  │ Fetching... ${totalFetched.toLocaleString()} / ~${apiRemaining.toLocaleString()} (${pct}%)`,
+              );
+            } else {
+              log(`  │ Fetching... ${totalFetched.toLocaleString()} events`);
+            }
           }
         }
       }
+
+      if (useProgressBar) process.stdout.write("\n");
 
       const elapsed = ((Date.now() - fetchStart) / 1000).toFixed(1);
       const finalCount = await countRawEventsForContract(db, contract.address);
@@ -197,7 +231,7 @@ async function phase2ProcessHandlers(
   }
 
   if (config.onSetup) {
-    await config.onSetup({ db, schema: config.schema ?? {} });
+    await config.onSetup({ db, schema: config.schema ?? EMPTY_SCHEMA });
   }
 
   const eventIdentifiers = [...new Set(config.contracts.flatMap((c) => c.eventIdentifiers))];
@@ -237,9 +271,9 @@ async function phase2ProcessHandlers(
       const batchedDb = createBatchedDb(tx as unknown as IndexerDb, insertBuffer);
       const ctx: HandlerContext = {
         db: batchedDb as unknown as IndexerDb,
-        sourceId: chunk[0]?.sourceId ?? "",
-        schema: config.schema ?? {},
-        client: chainClients.get(chunk[0]?.sourceId ?? "") ?? null,
+        sourceId: chunk[0]?.sourceId ?? EMPTY_SOURCE_ID,
+        schema: config.schema ?? EMPTY_SCHEMA,
+        client: chainClients.get(chunk[0]?.sourceId ?? EMPTY_SOURCE_ID) ?? null,
       };
 
       for (const event of chunk) {
@@ -328,7 +362,7 @@ async function phase3Realtime(
                 await handler(event, {
                   db: batchedDb as unknown as IndexerDb,
                   sourceId: event.sourceId,
-                  schema: config.schema ?? {},
+                  schema: config.schema ?? EMPTY_SCHEMA,
                   client: chainClients.get(event.sourceId) ?? null,
                 });
               }
@@ -422,7 +456,7 @@ export async function startIndexer(
 ): Promise<{ close: () => Promise<void> }> {
   const dbUrl = config.database.url;
   const hasUrl = !!dbUrl;
-  const dbLabel = dbUrl ? maskDbUrl(dbUrl) : (config.database.dataDir ?? "./indexer-data");
+  const dbLabel = dbUrl ? maskDbUrl(dbUrl) : (config.database.dataDir ?? DEFAULT_DATA_DIR);
   const contractCount = config.contracts.length;
   const identifiers = [...new Set(config.contracts.flatMap((c) => c.eventIdentifiers))];
 
@@ -430,7 +464,7 @@ export async function startIndexer(
   log(`Starting indexer`);
   log(`  DB: ${hasUrl ? "postgres" : "pglite"} → ${dbLabel}`);
   log(`  Contracts: ${contractCount} | Events: ${identifiers.join(", ")}`);
-  log(`  Schema: ${config.schemaName ?? "default"}`);
+  log(`  Schema: ${config.schemaName ?? DEFAULT_SCHEMA_NAME}`);
   log("═══════════════════════════════════════════════════");
 
   const indexerDb = await createDatabase(config.database);
@@ -453,7 +487,7 @@ export async function startIndexer(
 
   const chainClients = createChainClientsForConfig(config.sources, indexerDb.db);
 
-  await phase1Backfill(config, indexerDb.db);
+  await phase1Backfill(config, indexerDb.db, chainClients, options);
   await phase2ProcessHandlers(config, indexerDb.db, chainClients, options);
   const wsClient = await phase3Realtime(config, indexerDb.db, chainClients);
 
@@ -474,7 +508,7 @@ export async function startIndexer(
 export async function reindex(config: IndexerConfig, options?: { isDev?: boolean }): Promise<void> {
   const dbUrl = config.database.url;
   const hasUrl = !!dbUrl;
-  const dbLabel = dbUrl ? maskDbUrl(dbUrl) : (config.database.dataDir ?? "./indexer-data");
+  const dbLabel = dbUrl ? maskDbUrl(dbUrl) : (config.database.dataDir ?? DEFAULT_DATA_DIR);
   log(`Reindexing (${hasUrl ? "postgres" : "pglite"}: ${dbLabel})...`);
 
   const indexerDb = await createDatabase(config.database);

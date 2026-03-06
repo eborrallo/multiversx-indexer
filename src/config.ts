@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { DEFAULT_SCHEMA_NAME, KEPLER_ES_URL, KEPLER_WS_URL } from "./constants";
 import type { ChainReader } from "./runtime/chain-client";
 import type { IndexerDb } from "./runtime/db";
 import type { MultiversXEvent } from "./schema/types";
@@ -16,7 +17,7 @@ export function getDefaultSchemaName(): string {
   } catch {
     // ignore
   }
-  return "app";
+  return DEFAULT_SCHEMA_NAME;
 }
 
 export interface KeplerSourceConfig {
@@ -75,9 +76,6 @@ export interface IndexerConfig {
   healthPort?: number;
 }
 
-const KEPLER_ES_DEFAULT = "https://kepler-api.projectx.mx/mainnet/es";
-const KEPLER_WS_DEFAULT = "wss://kepler-api.projectx.mx/mainnet/events";
-
 export function defineConfig(config: IndexerConfig): IndexerConfig {
   if (!config.sources.length) {
     throw new Error("At least one source is required");
@@ -91,8 +89,8 @@ export function defineConfig(config: IndexerConfig): IndexerConfig {
       throw new Error(`Source "${source.id}" requires an apiKey`);
     }
     if (source.type === "kepler") {
-      source.esUrl ??= KEPLER_ES_DEFAULT;
-      source.wsUrl ??= KEPLER_WS_DEFAULT;
+      source.esUrl ??= KEPLER_ES_URL;
+      source.wsUrl ??= KEPLER_WS_URL;
     }
   }
 
@@ -106,7 +104,7 @@ export function defineConfig(config: IndexerConfig): IndexerConfig {
   }
 
   if (config.schemaName === undefined || config.schemaName === "") {
-    config.schemaName = getDefaultSchemaName();
+    config.schemaName = getDefaultSchemaName() || DEFAULT_SCHEMA_NAME;
   }
 
   return config;

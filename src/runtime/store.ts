@@ -1,9 +1,8 @@
 import { and, asc, count, eq, sql } from "drizzle-orm";
+import { RAW_BATCH_SIZE } from "../constants";
 import { multiverseCheckpoint, multiverseRawEvents } from "../schema/internal";
 import type { MultiversXEvent } from "../schema/types";
 import type { IndexerDb } from "./db";
-
-const RAW_BATCH_SIZE = 500;
 
 export function eventToRow(event: MultiversXEvent) {
   return {
@@ -122,7 +121,7 @@ type Cursor = { blockTimestamp: number; txHash: string; eventIndex: number };
  */
 export async function* readRawEventsChunked(
   db: IndexerDb,
-  chunkSize: number = 1000,
+  chunkSize: number = 10_000,
   sourceId?: string,
 ): AsyncGenerator<MultiversXEvent[]> {
   let cursor: Cursor | null = null;

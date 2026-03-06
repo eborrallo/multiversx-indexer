@@ -36,3 +36,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 test-reindex-data/
 indexer-data/
 :memory:
+
+# example folder for local testing
+example/
+example-data/
+
+# tmp debug scripts
+tmp-*.ts

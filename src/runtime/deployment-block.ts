@@ -1,12 +1,12 @@
+import { MULTIVERSX_API_URL } from "../constants";
+
 /**
  * Fetches the deployment block (round) of a contract from the MultiversX API.
  * Uses the first transaction where the account is involved (order=asc) as a proxy for deployment.
  */
-const DEFAULT_MULTIVERSX_API = "https://api.multiversx.com";
-
 export async function getDeploymentBlock(
   contractAddress: string,
-  apiBaseUrl: string = DEFAULT_MULTIVERSX_API,
+  apiBaseUrl: string = MULTIVERSX_API_URL,
 ): Promise<number | null> {
   const url = `${apiBaseUrl.replace(/\/$/, "")}/accounts/${encodeURIComponent(contractAddress)}/transactions?size=1&order=asc`;
   try {
@@ -25,7 +25,7 @@ export async function getDeploymentBlock(
  * Fetches the latest block round from the MultiversX API.
  */
 export async function getLatestBlock(
-  apiBaseUrl: string = DEFAULT_MULTIVERSX_API,
+  apiBaseUrl: string = MULTIVERSX_API_URL,
 ): Promise<number | null> {
   const url = `${apiBaseUrl.replace(/\/$/, "")}/blocks?size=1&order=desc`;
   try {

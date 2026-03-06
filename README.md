@@ -79,7 +79,7 @@ export default defineConfig({
       id: "kepler_mainnet",
       type: "kepler",
       apiKey: process.env.KEPLER_API_KEY ?? "",
-      batchSize: 100,
+      batchSize: 10_000,
       multiversxApiUrl: "https://api.multiversx.com",
     },
   ],

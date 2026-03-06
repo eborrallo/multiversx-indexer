@@ -22,7 +22,7 @@ export {
 } from "./runtime/chain-client";
 export type { IndexerDatabase, IndexerDb } from "./runtime/db";
 export { bootstrapInternalSchema, createDatabase } from "./runtime/db";
-export { KeplerEsFetcher, KeplerWsClient } from "./runtime/fetcher";
+export { KeplerEsFetcher } from "./runtime/elasticsearch-client";
 export {
   type GraphQLServerOptions,
   getHealthState,
@@ -41,6 +41,7 @@ export {
   rowToEvent,
   updateCheckpoint,
 } from "./runtime/store";
+export { KeplerWsClient } from "./runtime/websocket-client";
 export {
   multiverseChainCache,
   multiverseCheckpoint,

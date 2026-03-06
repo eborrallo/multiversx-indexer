@@ -4,6 +4,7 @@ import { sql } from "drizzle-orm";
 import { pgSchema, text } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/pglite";
 import { defineConfig } from "../config";
+import { KEPLER_ES_URL, KEPLER_WS_URL } from "../constants";
 import { bootstrapInternalSchema, INTERNAL_SCHEMA, type IndexerDb } from "../runtime/db";
 import { reindex } from "../runtime/pipeline";
 import {
@@ -279,10 +280,8 @@ describe("Config validation", () => {
       handlers: {},
     });
     const src = config.sources[0];
-    expect(src?.type === "kepler" && src?.esUrl).toBe("https://kepler-api.projectx.mx/mainnet/es");
-    expect(src?.type === "kepler" && src?.wsUrl).toBe(
-      "wss://kepler-api.projectx.mx/mainnet/events",
-    );
+    expect(src?.type === "kepler" && src?.esUrl).toBe(KEPLER_ES_URL);
+    expect(src?.type === "kepler" && src?.wsUrl).toBe(KEPLER_WS_URL);
   });
 });
 

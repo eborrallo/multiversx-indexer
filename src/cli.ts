@@ -2,11 +2,12 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, watch, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { IndexerConfig } from "./config";
+import { DEFAULT_CONFIG_PATH } from "./constants";
 import { startIndexer } from "./runtime/pipeline";
 
 const args = process.argv.slice(2);
 const command = args[0];
-const configPath = resolve(process.cwd(), args[1] ?? "indexer.config.ts");
+const configPath = resolve(process.cwd(), args[1] ?? DEFAULT_CONFIG_PATH);
 
 function getTemplatesDir(): string {
   const pkgDir = dirname(import.meta.dirname); // parent of src/ = package root

@@ -5,10 +5,9 @@
  */
 
 import { eq } from "drizzle-orm";
+import { MULTIVERSX_API_URL } from "../constants";
 import { multiverseChainCache } from "../schema/internal";
 import type { IndexerDb } from "./db";
-
-const DEFAULT_API = "https://api.multiversx.com";
 
 function normalizeUrl(url: string): string {
   return url.replace(/\/$/, "");
@@ -83,7 +82,7 @@ export interface ChainReader {
   ): Promise<ContractQueryResult>;
 }
 
-export function createChainClient(apiBaseUrl: string = DEFAULT_API): ChainReader {
+export function createChainClient(apiBaseUrl: string = MULTIVERSX_API_URL): ChainReader {
   const base = normalizeUrl(apiBaseUrl);
 
   return {
@@ -184,7 +183,7 @@ export function createChainClientsForConfig(
   const map = new Map<string, ChainReader>();
   for (const source of sources) {
     if (source.type !== "kepler") continue;
-    const apiUrl = source.multiversxApiUrl ?? DEFAULT_API;
+    const apiUrl = source.multiversxApiUrl ?? MULTIVERSX_API_URL;
     const inner = createChainClient(apiUrl);
     map.set(source.id, createCachedChainClient(inner, db, source.id));
   }
