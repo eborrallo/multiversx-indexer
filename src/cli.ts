@@ -103,8 +103,11 @@ async function loadConfig(path: string): Promise<IndexerConfig> {
   return config as IndexerConfig;
 }
 
-async function runStart(config: IndexerConfig): Promise<{ close: () => Promise<void> }> {
-  return startIndexer(config);
+async function runStart(
+  config: IndexerConfig,
+  options?: { isDev?: boolean },
+): Promise<{ close: () => Promise<void> }> {
+  return startIndexer(config, options);
 }
 
 async function main() {
@@ -168,7 +171,7 @@ async function main() {
     }
     try {
       config = await loadConfig(configPath);
-      indexer = await runStart(config);
+      indexer = await runStart(config, { isDev: command === "dev" });
     } catch (e) {
       console.error("Error:", e);
       if (command === "start") process.exit(1);

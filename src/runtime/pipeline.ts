@@ -186,6 +186,7 @@ async function phase2ProcessHandlers(
   config: IndexerConfig,
   db: IndexerDb,
   chainClients: Map<string, ChainReader>,
+  options?: { isDev?: boolean },
 ): Promise<void> {
   setPhase("processing");
   log("Process raw events into user tables");
@@ -208,11 +209,27 @@ async function phase2ProcessHandlers(
     return;
   }
 
+  const useProgressBar = (options?.isDev ?? false) && process.stdout.isTTY;
+  const barWidth = 24;
+
   log(`  Raw events to process: ${totalRaw.toLocaleString()} [${eventIdentifiers.join(", ")}]`);
 
   let processed = 0;
   let _lastTimestamp: number | null = null;
   const procStart = Date.now();
+
+  function renderProgressBar() {
+    if (!useProgressBar) return;
+    const pct = totalRaw > 0 ? processed / totalRaw : 1;
+    const filled = Math.round(barWidth * pct);
+    const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
+    const elapsed = ((Date.now() - procStart) / 1000).toFixed(1);
+    process.stdout.write(
+      `\r  [${bar}] ${processed.toLocaleString()}/${totalRaw.toLocaleString()} (${Math.round(pct * 100)}%) — ${elapsed}s\x1b[K`,
+    );
+  }
+
+  if (useProgressBar) renderProgressBar();
 
   for await (const chunk of readRawEventsChunked(db, HANDLER_BATCH_SIZE)) {
     await db.transaction(async (tx) => {
@@ -242,16 +259,23 @@ async function phase2ProcessHandlers(
     if (lastInChunk) _lastTimestamp = lastInChunk.timestamp;
     addProcessed(chunk.length);
 
-    const shouldLog = processed % 10_000 === 0 || chunk.length < HANDLER_BATCH_SIZE;
-    if (shouldLog) {
-      const pct = Math.round((processed / totalRaw) * 100);
-      const elapsed = ((Date.now() - procStart) / 1000).toFixed(1);
-      log(
-        `  Processing... ${processed.toLocaleString()} / ${totalRaw.toLocaleString()} (${pct}%) — ${elapsed}s`,
-      );
+    if (useProgressBar) {
+      renderProgressBar();
+    } else {
+      const shouldLog = processed % 10_000 === 0 || chunk.length < HANDLER_BATCH_SIZE;
+      if (shouldLog) {
+        const pct = Math.round((processed / totalRaw) * 100);
+        const elapsed = ((Date.now() - procStart) / 1000).toFixed(1);
+        log(
+          `  Processing... ${processed.toLocaleString()} / ${totalRaw.toLocaleString()} (${pct}%) — ${elapsed}s`,
+        );
+      }
     }
   }
 
+  if (useProgressBar) {
+    process.stdout.write("\n");
+  }
   const totalElapsed = ((Date.now() - procStart) / 1000).toFixed(1);
   log(`Process complete — ${processed.toLocaleString()} events processed in ${totalElapsed}s`);
 }
@@ -392,7 +416,10 @@ async function phase3Realtime(
 // Public API
 // ---------------------------------------------------------------------------
 
-export async function startIndexer(config: IndexerConfig): Promise<{ close: () => Promise<void> }> {
+export async function startIndexer(
+  config: IndexerConfig,
+  options?: { isDev?: boolean },
+): Promise<{ close: () => Promise<void> }> {
   const dbUrl = config.database.url;
   const hasUrl = !!dbUrl;
   const dbLabel = dbUrl ? maskDbUrl(dbUrl) : (config.database.dataDir ?? "./indexer-data");
@@ -427,7 +454,7 @@ export async function startIndexer(config: IndexerConfig): Promise<{ close: () =
   const chainClients = createChainClientsForConfig(config.sources, indexerDb.db);
 
   await phase1Backfill(config, indexerDb.db);
-  await phase2ProcessHandlers(config, indexerDb.db, chainClients);
+  await phase2ProcessHandlers(config, indexerDb.db, chainClients, options);
   const wsClient = await phase3Realtime(config, indexerDb.db, chainClients);
 
   log("═══════════════════════════════════════════════════");
@@ -444,7 +471,7 @@ export async function startIndexer(config: IndexerConfig): Promise<{ close: () =
   };
 }
 
-export async function reindex(config: IndexerConfig): Promise<void> {
+export async function reindex(config: IndexerConfig, options?: { isDev?: boolean }): Promise<void> {
   const dbUrl = config.database.url;
   const hasUrl = !!dbUrl;
   const dbLabel = dbUrl ? maskDbUrl(dbUrl) : (config.database.dataDir ?? "./indexer-data");
@@ -455,7 +482,7 @@ export async function reindex(config: IndexerConfig): Promise<void> {
 
   const chainClients = createChainClientsForConfig(config.sources, indexerDb.db);
 
-  await phase2ProcessHandlers(config, indexerDb.db, chainClients);
+  await phase2ProcessHandlers(config, indexerDb.db, chainClients, options);
 
   await indexerDb.close();
   log("Reindex complete.");
