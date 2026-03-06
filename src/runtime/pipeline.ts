@@ -4,7 +4,7 @@ import { createBatchedDb, flushInsertBuffer } from "./batched-db";
 import type { ChainReader } from "./chain-client";
 import { createChainClientsForConfig } from "./chain-client";
 import type { IndexerDb } from "./db";
-import { bootstrapInternalSchema, createDatabase } from "./db";
+import { bootstrapInternalSchema, createDatabase, maskDbUrl } from "./db";
 import { getDeploymentBlock, getLatestBlock } from "./deployment-block";
 import { KeplerEsFetcher, KeplerWsClient } from "./fetcher";
 import { addProcessed, setHealthy, setPhase, setReady, startHealthServer } from "./health";
@@ -393,8 +393,9 @@ async function phase3Realtime(
 // ---------------------------------------------------------------------------
 
 export async function startIndexer(config: IndexerConfig): Promise<{ close: () => Promise<void> }> {
-  const hasUrl = !!config.database.url;
-  const dbLabel = config.database.url ?? config.database.dataDir ?? "./indexer-data";
+  const dbUrl = config.database.url;
+  const hasUrl = !!dbUrl;
+  const dbLabel = dbUrl ? maskDbUrl(dbUrl) : (config.database.dataDir ?? "./indexer-data");
   const contractCount = config.contracts.length;
   const identifiers = [...new Set(config.contracts.flatMap((c) => c.eventIdentifiers))];
 
@@ -444,10 +445,10 @@ export async function startIndexer(config: IndexerConfig): Promise<{ close: () =
 }
 
 export async function reindex(config: IndexerConfig): Promise<void> {
-  const hasUrl = !!config.database.url;
-  log(
-    `Reindexing (${hasUrl ? "postgres" : "pglite"}: ${config.database.url ?? config.database.dataDir ?? "./indexer-data"})...`,
-  );
+  const dbUrl = config.database.url;
+  const hasUrl = !!dbUrl;
+  const dbLabel = dbUrl ? maskDbUrl(dbUrl) : (config.database.dataDir ?? "./indexer-data");
+  log(`Reindexing (${hasUrl ? "postgres" : "pglite"}: ${dbLabel})...`);
 
   const indexerDb = await createDatabase(config.database);
   await bootstrapInternalSchema(indexerDb.db);
