@@ -1,4 +1,4 @@
-import { and, asc, count, eq, sql } from "drizzle-orm";
+import { and, asc, count, eq, inArray, sql } from "drizzle-orm";
 import { RAW_BATCH_SIZE } from "../constants";
 import { multiverseCheckpoint, multiverseRawEvents } from "../schema/internal";
 import type { MultiversXEvent } from "../schema/types";
@@ -51,6 +51,51 @@ export async function batchInsertRawEvents(
   return inserted;
 }
 
+/**
+ * Get the minimum lastTimestamp across all checkpoints for (sourceId, contractAddress, eventIdentifier).
+ * Used to determine afterTimestamp when fetching - we must not miss events from any topic.
+ */
+export async function getCheckpointForContract(
+  db: IndexerDb,
+  sourceId: string,
+  contractAddress: string,
+  eventIdentifiers: string[],
+): Promise<{
+  lastTxHash: string | null;
+  lastTimestamp: number | null;
+  lastFromIndex: number | null;
+} | null> {
+  if (eventIdentifiers.length === 0) return null;
+
+  const rows = await db
+    .select()
+    .from(multiverseCheckpoint)
+    .where(
+      and(
+        eq(multiverseCheckpoint.sourceId, sourceId),
+        eq(multiverseCheckpoint.contractAddress, contractAddress),
+        inArray(multiverseCheckpoint.eventIdentifier, eventIdentifiers),
+      ),
+    );
+
+  if (rows.length === 0) return null;
+
+  const first = rows[0];
+  if (!first) return null;
+  const minRow = rows.slice(1).reduce((acc, r) => {
+    const ts = r.lastTimestamp ?? 0;
+    const accTs = acc.lastTimestamp ?? 0;
+    return ts < accTs ? r : acc;
+  }, first);
+
+  return {
+    lastTxHash: minRow.lastTxHash,
+    lastTimestamp: minRow.lastTimestamp,
+    lastFromIndex: minRow.lastFromIndex,
+  };
+}
+
+/** @deprecated Use getCheckpointForContract. Kept for backwards compatibility in tests. */
 export async function getCheckpoint(db: IndexerDb, sourceId: string) {
   const rows = await db
     .select()
@@ -59,33 +104,47 @@ export async function getCheckpoint(db: IndexerDb, sourceId: string) {
   return rows[0] ?? null;
 }
 
+/**
+ * Update checkpoint for each event identifier. When we process a batch of events
+ * (sorted by timestamp), we've seen all events up to the last one - so we update
+ * all event identifiers for this contract to that position.
+ */
 export async function updateCheckpoint(
   db: IndexerDb,
   sourceId: string,
   contractAddress: string,
+  eventIdentifiers: string[],
   lastTxHash: string | null,
   lastTimestamp: number | null,
   lastFromIndex: number | null,
 ) {
-  await db
-    .insert(multiverseCheckpoint)
-    .values({
-      sourceId,
-      contractAddress,
-      lastTxHash,
-      lastTimestamp,
-      lastFromIndex,
-      updatedAt: Math.floor(Date.now() / 1000),
-    })
-    .onConflictDoUpdate({
-      target: multiverseCheckpoint.sourceId,
-      set: {
+  const updatedAt = Math.floor(Date.now() / 1000);
+  for (const eventIdentifier of eventIdentifiers) {
+    await db
+      .insert(multiverseCheckpoint)
+      .values({
+        sourceId,
+        contractAddress,
+        eventIdentifier,
         lastTxHash,
         lastTimestamp,
         lastFromIndex,
-        updatedAt: Math.floor(Date.now() / 1000),
-      },
-    });
+        updatedAt,
+      })
+      .onConflictDoUpdate({
+        target: [
+          multiverseCheckpoint.sourceId,
+          multiverseCheckpoint.contractAddress,
+          multiverseCheckpoint.eventIdentifier,
+        ],
+        set: {
+          lastTxHash,
+          lastTimestamp,
+          lastFromIndex,
+          updatedAt,
+        },
+      });
+  }
 }
 
 export async function countRawEvents(db: IndexerDb, sourceId?: string): Promise<number> {
@@ -106,6 +165,23 @@ export async function countRawEventsForContract(
     .select({ total: count() })
     .from(multiverseRawEvents)
     .where(eq(multiverseRawEvents.contractAddress, contractAddress));
+  return result[0]?.total ?? 0;
+}
+
+export async function countRawEventsForContractAndEvent(
+  db: IndexerDb,
+  contractAddress: string,
+  eventIdentifier: string,
+): Promise<number> {
+  const result = await db
+    .select({ total: count() })
+    .from(multiverseRawEvents)
+    .where(
+      and(
+        eq(multiverseRawEvents.contractAddress, contractAddress),
+        eq(multiverseRawEvents.eventIdentifier, eventIdentifier),
+      ),
+    );
   return result[0]?.total ?? 0;
 }
 

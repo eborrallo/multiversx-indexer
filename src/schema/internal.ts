@@ -1,4 +1,4 @@
-import { index, integer, pgSchema, text } from "drizzle-orm/pg-core";
+import { index, integer, pgSchema, primaryKey, text } from "drizzle-orm/pg-core";
 import { INTERNAL_SCHEMA } from "../runtime/db";
 
 const internal = pgSchema(INTERNAL_SCHEMA);
@@ -25,14 +25,23 @@ export const multiverseRawEvents = internal.table(
   }),
 );
 
-export const multiverseCheckpoint = internal.table("_multiverse_checkpoint", {
-  sourceId: text("source_id").primaryKey(),
-  contractAddress: text("contract_address").notNull(),
-  lastTxHash: text("last_tx_hash"),
-  lastTimestamp: integer("last_timestamp"),
-  lastFromIndex: integer("last_from_index"),
-  updatedAt: integer("updated_at"),
-});
+export const multiverseCheckpoint = internal.table(
+  "_multiverse_checkpoint",
+  {
+    sourceId: text("source_id").notNull(),
+    contractAddress: text("contract_address").notNull(),
+    eventIdentifier: text("event_identifier").notNull(),
+    lastTxHash: text("last_tx_hash"),
+    lastTimestamp: integer("last_timestamp"),
+    lastFromIndex: integer("last_from_index"),
+    updatedAt: integer("updated_at"),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.sourceId, table.contractAddress, table.eventIdentifier],
+    }),
+  ],
+);
 
 /** Cache for chain read calls (getAccount, getTransaction, queryContract). Persists across reindexes. */
 export const multiverseChainCache = internal.table("_multiverse_chain_cache", {

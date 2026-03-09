@@ -246,15 +246,18 @@ export async function bootstrapInternalSchema(db: IndexerDb): Promise<void> {
   await db.execute(
     sql.raw(`
     CREATE TABLE IF NOT EXISTS "${s}"."_multiverse_checkpoint" (
-      source_id TEXT PRIMARY KEY,
+      source_id TEXT NOT NULL,
       contract_address TEXT NOT NULL,
+      event_identifier TEXT NOT NULL,
       last_tx_hash TEXT,
       last_timestamp INTEGER,
       last_from_index INTEGER,
-      updated_at INTEGER
+      updated_at INTEGER,
+      PRIMARY KEY (source_id, contract_address, event_identifier)
     )
   `),
   );
+  await migrateCheckpointFromLegacy(db, s);
   await db.execute(
     sql.raw(`
     CREATE TABLE IF NOT EXISTS "${s}"."_multiverse_chain_cache" (
@@ -268,4 +271,43 @@ export async function bootstrapInternalSchema(db: IndexerDb): Promise<void> {
   log(
     `  Internal schema ready (tables: _multiverse_raw_events, _multiverse_checkpoint, _multiverse_chain_cache)`,
   );
+}
+
+/**
+ * Migrate checkpoint table from legacy schema (source_id PK only) to new schema
+ * (source_id, contract_address, event_identifier) composite PK.
+ * If legacy schema is detected, drops and recreates the table (checkpoint state is lost).
+ */
+async function migrateCheckpointFromLegacy(db: IndexerDb, schema: string): Promise<void> {
+  const raw = await db.execute(
+    sql.raw(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema = '${schema}' AND table_name = '_multiverse_checkpoint'
+    `),
+  );
+  const rows: Array<{ column_name: string }> = Array.isArray(raw)
+    ? raw
+    : ((raw as { rows?: Array<{ column_name: string }> })?.rows ?? []);
+  const columns = new Set(rows.map((r) => r.column_name));
+  if (columns.has("event_identifier")) return;
+
+  log(
+    `  Migrating checkpoint table to new schema (source_id + contract_address + event_identifier)...`,
+  );
+  await db.execute(sql.raw(`DROP TABLE IF EXISTS "${schema}"."_multiverse_checkpoint"`));
+  await db.execute(
+    sql.raw(`
+    CREATE TABLE "${schema}"."_multiverse_checkpoint" (
+      source_id TEXT NOT NULL,
+      contract_address TEXT NOT NULL,
+      event_identifier TEXT NOT NULL,
+      last_tx_hash TEXT,
+      last_timestamp INTEGER,
+      last_from_index INTEGER,
+      updated_at INTEGER,
+      PRIMARY KEY (source_id, contract_address, event_identifier)
+    )
+  `),
+  );
+  log(`  Checkpoint migration complete (previous checkpoint state was reset).`);
 }

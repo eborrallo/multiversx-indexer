@@ -206,7 +206,7 @@ describe("Checkpoint", () => {
     const db = makeDb();
     await bootstrapInternalSchema(db);
 
-    await updateCheckpoint(db, "src1", "erd1abc", "txABC", 5000, 42);
+    await updateCheckpoint(db, "src1", "erd1abc", ["transfer"], "txABC", 5000, 42);
     const cp = await getCheckpoint(db, "src1");
     expect(cp).not.toBeNull();
     expect(cp?.lastTxHash).toBe("txABC");
@@ -218,12 +218,30 @@ describe("Checkpoint", () => {
     const db = makeDb();
     await bootstrapInternalSchema(db);
 
-    await updateCheckpoint(db, "src1", "erd1abc", "tx1", 1000, null);
-    await updateCheckpoint(db, "src1", "erd1abc", "tx2", 2000, null);
+    await updateCheckpoint(db, "src1", "erd1abc", ["ev"], "tx1", 1000, null);
+    await updateCheckpoint(db, "src1", "erd1abc", ["ev"], "tx2", 2000, null);
 
     const cp = await getCheckpoint(db, "src1");
     expect(cp?.lastTxHash).toBe("tx2");
     expect(cp?.lastTimestamp).toBe(2000);
+  });
+
+  test("multiple events from same contract have independent checkpoints", async () => {
+    const db = makeDb();
+    await bootstrapInternalSchema(db);
+    const { getCheckpointForContract } = await import("../runtime/store");
+
+    await updateCheckpoint(db, "src1", "erd1abc", ["EventA"], "txA", 1000, null);
+    await updateCheckpoint(db, "src1", "erd1abc", ["EventB"], "txB", 2000, null);
+
+    const cpBoth = await getCheckpointForContract(db, "src1", "erd1abc", ["EventA", "EventB"]);
+    expect(cpBoth?.lastTimestamp).toBe(1000);
+    expect(cpBoth?.lastTxHash).toBe("txA");
+
+    const cpA = await getCheckpointForContract(db, "src1", "erd1abc", ["EventA"]);
+    const cpB = await getCheckpointForContract(db, "src1", "erd1abc", ["EventB"]);
+    expect(cpA?.lastTimestamp).toBe(1000);
+    expect(cpB?.lastTimestamp).toBe(2000);
   });
 });
 

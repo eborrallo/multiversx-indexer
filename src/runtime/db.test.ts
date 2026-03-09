@@ -16,6 +16,7 @@ import {
   countRawEventsForContract,
   eventExistsInRaw,
   getCheckpoint,
+  getCheckpointForContract,
   readRawEventsChunked,
   updateCheckpoint,
 } from "./store";
@@ -243,7 +244,7 @@ describe("IndexerLogger", () => {
     const logger = new IndexerLogger();
     const spy = spyOn(console, "log").mockImplementation(() => {});
     try {
-      const longQuery = "SELECT " + "x".repeat(150);
+      const longQuery = `SELECT ${"x".repeat(150)}`;
       logger.logQuery(longQuery, []);
       expect(spy).toHaveBeenCalledWith(expect.stringMatching(/^\[sql\] .{120}…$/));
     } finally {
@@ -347,12 +348,31 @@ describe("db client read validation", () => {
   });
 
   test("getCheckpoint returns saved checkpoint", async () => {
-    await updateCheckpoint(db, "src1", "erd1abc", "txABC", 5000, 42);
+    await updateCheckpoint(db, "src1", "erd1abc", ["transfer"], "txABC", 5000, 42);
     const cp = await getCheckpoint(db, "src1");
     expect(cp).not.toBeNull();
     expect(cp?.lastTxHash).toBe("txABC");
     expect(cp?.lastTimestamp).toBe(5000);
     expect(cp?.lastFromIndex).toBe(42);
+  });
+
+  test("getCheckpointForContract returns min timestamp across event identifiers", async () => {
+    await updateCheckpoint(db, "src1", "erd1abc", ["EventA"], "txA", 1000, null);
+    await updateCheckpoint(db, "src1", "erd1abc", ["EventB"], "txB", 2000, null);
+    const cp = await getCheckpointForContract(db, "src1", "erd1abc", ["EventA", "EventB"]);
+    expect(cp).not.toBeNull();
+    expect(cp?.lastTimestamp).toBe(1000);
+    expect(cp?.lastTxHash).toBe("txA");
+  });
+
+  test("getCheckpointForContract supports multiple events from same contract", async () => {
+    await updateCheckpoint(db, "src1", "erd1abc", ["Event1", "Event2"], "txLast", 5000, null);
+    const cpEvent1 = await getCheckpointForContract(db, "src1", "erd1abc", ["Event1"]);
+    const cpEvent2 = await getCheckpointForContract(db, "src1", "erd1abc", ["Event2"]);
+    const cpBoth = await getCheckpointForContract(db, "src1", "erd1abc", ["Event1", "Event2"]);
+    expect(cpEvent1?.lastTimestamp).toBe(5000);
+    expect(cpEvent2?.lastTimestamp).toBe(5000);
+    expect(cpBoth?.lastTimestamp).toBe(5000);
   });
 
   test("countRawEvents returns 0 when empty", async () => {

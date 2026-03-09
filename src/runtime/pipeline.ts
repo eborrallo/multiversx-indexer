@@ -21,7 +21,7 @@ import {
   countRawEvents,
   countRawEventsForContract,
   eventExistsInRaw,
-  getCheckpoint,
+  getCheckpointForContract,
   readRawEventsChunked,
   updateCheckpoint,
 } from "./store";
@@ -37,7 +37,7 @@ function log(msg: string) {
 async function phase1Backfill(
   config: IndexerConfig,
   db: IndexerDb,
-  chainClients: Map<string, ChainReader>,
+  _chainClients: Map<string, ChainReader>,
   options?: { isDev?: boolean },
 ): Promise<void> {
   setPhase("backfill");
@@ -66,7 +66,12 @@ async function phase1Backfill(
       log(`  ┌ ${addrShort} [${identifiers}]`);
 
       // --- resolve block range ---
-      const checkpoint = await getCheckpoint(db, source.id);
+      const checkpoint = await getCheckpointForContract(
+        db,
+        source.id,
+        contract.address,
+        contract.eventIdentifiers,
+      );
       const afterTimestamp = checkpoint?.lastTimestamp ?? contract.startTimestamp ?? null;
       let afterBlock = checkpoint != null ? null : (contract.fromBlock ?? null);
 
@@ -102,16 +107,21 @@ async function phase1Backfill(
       // --- count events in DB for this contract ---
       const eventsInDb = await countRawEventsForContract(db, contract.address);
 
-      // --- count remaining on API ---
-      let apiRemaining: number | null = null;
+      // --- count remaining on API per event type ---
+      const apiRemainingByEvent = new Map<string, number>();
+      let apiRemainingTotal: number | null = null;
       try {
-        apiRemaining = await fetcher.countEvents(
-          [contract],
-          afterTimestamp ?? null,
-          contract.endTimestamp ?? null,
-          afterBlock ?? null,
-          beforeBlock ?? null,
-        );
+        for (const evId of contract.eventIdentifiers) {
+          const count = await fetcher.countEvents(
+            [{ ...contract, eventIdentifiers: [evId] }],
+            afterTimestamp ?? null,
+            contract.endTimestamp ?? null,
+            afterBlock ?? null,
+            beforeBlock ?? null,
+          );
+          apiRemainingByEvent.set(evId, count);
+        }
+        apiRemainingTotal = [...apiRemainingByEvent.values()].reduce((a, b) => a + b, 0);
       } catch {
         /* ignore */
       }
@@ -122,33 +132,50 @@ async function phase1Backfill(
 
       log(
         `  │ In DB: ${eventsInDb.toLocaleString()} events` +
-          (apiRemaining != null ? ` | On API (remaining): ~${apiRemaining.toLocaleString()}` : ""),
+          (apiRemainingTotal != null
+            ? ` | On API (remaining): ~${apiRemainingTotal.toLocaleString()}`
+            : ""),
       );
 
-      if (apiRemaining != null && apiRemaining <= 0) {
+      if (apiRemainingTotal != null && apiRemainingTotal <= 0) {
         log(`  └ ✓ Fully synced — nothing to fetch`);
         continue;
       }
 
       // --- fetch loop ---
+      const fetchedByEvent = new Map<string, number>();
+      for (const evId of contract.eventIdentifiers) {
+        fetchedByEvent.set(evId, 0);
+      }
       let totalFetched = 0;
       const fetchStart = Date.now();
       const useProgressBar =
         (options?.isDev ?? false) &&
         process.stdout.isTTY &&
-        apiRemaining != null &&
-        apiRemaining > 0;
-      const barWidth = 24;
+        apiRemainingTotal != null &&
+        apiRemainingTotal > 0;
+      const barWidth = 20;
 
+      let hasRenderedBar = false;
       function renderBackfillBar() {
-        if (!useProgressBar || apiRemaining == null) return;
-        const pct = Math.min(1, totalFetched / apiRemaining);
-        const filled = Math.round(barWidth * pct);
-        const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
+        if (!useProgressBar || apiRemainingTotal == null) return;
         const elapsed = ((Date.now() - fetchStart) / 1000).toFixed(1);
-        process.stdout.write(
-          `\r  │ [${bar}] ${totalFetched.toLocaleString()}/~${apiRemaining.toLocaleString()} (${Math.round(pct * 100)}%) — ${elapsed}s\x1b[K`,
-        );
+        const lines: string[] = [];
+        for (const evId of contract.eventIdentifiers) {
+          const fetched = fetchedByEvent.get(evId) ?? 0;
+          const remaining = apiRemainingByEvent.get(evId) ?? 0;
+          const pct = remaining > 0 ? Math.min(1, fetched / remaining) : 1;
+          const filled = Math.round(barWidth * pct);
+          const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
+          const label = evId.padEnd(24).slice(0, 24);
+          lines.push(
+            `  │ ${label} [${bar}] ${fetched.toLocaleString()}/~${remaining.toLocaleString()} (${Math.round(pct * 100)}%)`,
+          );
+        }
+        const n = contract.eventIdentifiers.length;
+        const moveUp = hasRenderedBar && n > 0 ? `\x1b[${n}A\r` : "";
+        process.stdout.write(`${moveUp}${lines.join("\n")} — ${elapsed}s\x1b[K`);
+        hasRenderedBar = true;
       }
 
       for await (const batch of fetcher.fetchAllEvents(
@@ -159,6 +186,10 @@ async function phase1Backfill(
         beforeBlock,
       )) {
         await batchInsertRawEvents(db, batch);
+        for (const ev of batch) {
+          const cur = fetchedByEvent.get(ev.identifier) ?? 0;
+          fetchedByEvent.set(ev.identifier, cur + 1);
+        }
         totalFetched += batch.length;
 
         const lastEvent = batch[batch.length - 1];
@@ -167,6 +198,7 @@ async function phase1Backfill(
             db,
             source.id,
             contract.address,
+            contract.eventIdentifiers,
             lastEvent.txHash,
             lastEvent.timestamp,
             null,
@@ -177,15 +209,15 @@ async function phase1Backfill(
           renderBackfillBar();
         } else {
           const shouldLog =
-            apiRemaining != null && apiRemaining > 0
-              ? totalFetched % 10_000 === 0 || totalFetched >= apiRemaining
+            apiRemainingTotal != null && apiRemainingTotal > 0
+              ? totalFetched % 10_000 === 0 || totalFetched >= apiRemainingTotal
               : totalFetched % 10_000 === 0;
 
           if (shouldLog) {
-            if (apiRemaining != null && apiRemaining > 0) {
-              const pct = Math.min(100, Math.round((totalFetched / apiRemaining) * 100));
+            if (apiRemainingTotal != null && apiRemainingTotal > 0) {
+              const pct = Math.min(100, Math.round((totalFetched / apiRemainingTotal) * 100));
               log(
-                `  │ Fetching... ${totalFetched.toLocaleString()} / ~${apiRemaining.toLocaleString()} (${pct}%)`,
+                `  │ Fetching... ${totalFetched.toLocaleString()} / ~${apiRemainingTotal.toLocaleString()} (${pct}%)`,
               );
             } else {
               log(`  │ Fetching... ${totalFetched.toLocaleString()} events`);
@@ -332,7 +364,12 @@ async function phase3Realtime(
     const contracts = config.contracts.filter((c) => c.sourceId === source.id);
 
     for (const contract of contracts) {
-      const checkpoint = await getCheckpoint(db, source.id);
+      const checkpoint = await getCheckpointForContract(
+        db,
+        source.id,
+        contract.address,
+        contract.eventIdentifiers,
+      );
       const afterTimestamp = checkpoint?.lastTimestamp ?? null;
 
       for await (const batch of fetcher.fetchAllEvents(
@@ -377,6 +414,7 @@ async function phase3Realtime(
             db,
             source.id,
             contract.address,
+            contract.eventIdentifiers,
             lastEvent.txHash,
             lastEvent.timestamp,
             null,
@@ -423,6 +461,7 @@ async function phase3Realtime(
         db,
         keplerSource.id,
         event.address,
+        [event.identifier],
         event.txHash,
         event.timestamp,
         null,

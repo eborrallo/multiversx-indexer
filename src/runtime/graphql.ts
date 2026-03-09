@@ -5,8 +5,12 @@ import {
   eq,
   getTableColumns,
   getTableName,
+  gt,
+  gte,
   ilike,
   inArray,
+  lt,
+  lte,
   type SQL,
 } from "drizzle-orm";
 import type { Column } from "drizzle-orm/column";
@@ -203,6 +207,12 @@ export function buildGraphQLSchema(
       if (gqlType === GraphQLString) {
         whereInputFields[`${columnKey}_contains`] = { type: GraphQLString };
       }
+      if (gqlType === GraphQLInt || gqlType === GraphQLFloat) {
+        whereInputFields[`${columnKey}_gt`] = { type: scalar };
+        whereInputFields[`${columnKey}_gte`] = { type: scalar };
+        whereInputFields[`${columnKey}_lt`] = { type: scalar };
+        whereInputFields[`${columnKey}_lte`] = { type: scalar };
+      }
     }
     const whereInput = new GraphQLInputObjectType({
       name: `${meta.typeName}Where`,
@@ -242,7 +252,18 @@ export function buildGraphQLSchema(
             const eqMatch = key.match(/^(.+)_eq$/);
             const inMatch = key.match(/^(.+)_in$/);
             const containsMatch = key.match(/^(.+)_contains$/);
-            const colKey = eqMatch?.[1] ?? inMatch?.[1] ?? containsMatch?.[1];
+            const gtMatch = key.match(/^(.+)_gt$/);
+            const gteMatch = key.match(/^(.+)_gte$/);
+            const ltMatch = key.match(/^(.+)_lt$/);
+            const lteMatch = key.match(/^(.+)_lte$/);
+            const colKey =
+              eqMatch?.[1] ??
+              inMatch?.[1] ??
+              containsMatch?.[1] ??
+              gtMatch?.[1] ??
+              gteMatch?.[1] ??
+              ltMatch?.[1] ??
+              lteMatch?.[1];
             if (!colKey) continue;
             const col = meta.columns.find((c) => c.columnKey === colKey);
             if (!col) continue;
@@ -253,6 +274,14 @@ export function buildGraphQLSchema(
               conditions.push(inArray(colRef as never, value) as SQL);
             } else if (containsMatch && typeof value === "string") {
               conditions.push(ilike(colRef as never, `%${value}%`) as SQL);
+            } else if (gtMatch && (typeof value === "number" || typeof value === "string")) {
+              conditions.push(gt(colRef as never, value) as SQL);
+            } else if (gteMatch && (typeof value === "number" || typeof value === "string")) {
+              conditions.push(gte(colRef as never, value) as SQL);
+            } else if (ltMatch && (typeof value === "number" || typeof value === "string")) {
+              conditions.push(lt(colRef as never, value) as SQL);
+            } else if (lteMatch && (typeof value === "number" || typeof value === "string")) {
+              conditions.push(lte(colRef as never, value) as SQL);
             }
           }
           if (conditions.length > 0) {
