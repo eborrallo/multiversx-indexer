@@ -213,12 +213,14 @@ export function buildGraphQLSchema(
       type: new GraphQLList(objectType),
       args: {
         limit: { type: GraphQLInt, defaultValue: 100 },
+        offset: { type: GraphQLInt, defaultValue: 0 },
         orderBy: { type: orderByInput },
         where: { type: whereInput },
       },
       resolve: async (_source, args, context) => {
         const limit = Math.min(Number(args.limit) || GRAPHQL_DEFAULT_LIMIT, GRAPHQL_MAX_LIMIT);
-        let query = context.db.select().from(meta.table).limit(limit);
+        const offset = Math.max(0, Number(args.offset) || 0);
+        let query = context.db.select().from(meta.table);
 
         const orderByArg = args.orderBy as { field?: string; direction?: string } | undefined;
         if (orderByArg?.field) {
@@ -258,6 +260,7 @@ export function buildGraphQLSchema(
           }
         }
 
+        query = query.limit(limit).offset(offset) as typeof query;
         const rows = await query;
         return rows as Record<string, unknown>[];
       },
