@@ -34,10 +34,15 @@ export class KeplerWsClient {
   private onErrorCb: ((error: Error) => void) | null = null;
   /** Base64 topics we subscribed to — filter incoming events by first topic. */
   private subscribedTopics = new Set<string>();
+  /** Contract addresses we subscribed to — filter incoming events by address. */
+  private subscribedAddresses = new Set<string>();
 
-  private matchesSubscribedTopic(firstTopic: string): boolean {
-    if (this.subscribedTopics.size === 0) return true;
-    return this.subscribedTopics.has(firstTopic);
+  private matchesSubscription(ev: { address?: string; topics?: string[] }): boolean {
+    const addr = ev?.address ?? "";
+    const firstTopic = ev?.topics?.[0] ?? "";
+    if (this.subscribedAddresses.size > 0 && !this.subscribedAddresses.has(addr)) return false;
+    if (this.subscribedTopics.size > 0 && !this.subscribedTopics.has(firstTopic)) return false;
+    return true;
   }
 
   constructor(source: KeplerSourceConfig) {
@@ -83,7 +88,9 @@ export class KeplerWsClient {
       console.log(`WebSocket connected to ${this.wsUrl}`);
       const entries: Array<{ address: string; topics?: string[] }> = [];
       this.subscribedTopics.clear();
+      this.subscribedAddresses.clear();
       for (const c of contracts) {
+        this.subscribedAddresses.add(c.address);
         const topics = (c.eventTopics ?? c.eventIdentifiers).map(toBase64Topic).filter(Boolean);
         if (topics.length > 0) {
           for (const topic of topics) {
@@ -111,9 +118,9 @@ export class KeplerWsClient {
         const events = Array.isArray(data) ? data : Array.isArray(data?.events) ? data.events : [];
         if (events.length === 0) return; // skip empty/heartbeat
 
-        // Filter: keep only events whose first topic matches our subscription
-        const filteredEvents = events.filter((ev: { topics?: string[] }) =>
-          this.matchesSubscribedTopic(ev?.topics?.[0] ?? ""),
+        // Filter: keep only events matching our subscribed address and topic
+        const filteredEvents = events.filter((ev: { address?: string; topics?: string[] }) =>
+          this.matchesSubscription(ev),
         );
         if (filteredEvents.length === 0) return;
 

@@ -1,4 +1,4 @@
-import type { HandlerContext, IndexerConfig, KeplerSourceConfig } from "../config";
+import type { EventHandler, HandlerContext, IndexerConfig, KeplerSourceConfig } from "../config";
 import {
   DEFAULT_DATA_DIR,
   DEFAULT_SCHEMA_NAME,
@@ -18,17 +18,29 @@ import { addProcessed, setHealthy, setPhase, setReady, startHealthServer } from 
 import { syncUserSchema } from "./schema-sync";
 import {
   batchInsertRawEvents,
+  buildAllowedEventKeys,
   countRawEvents,
   countRawEventsForContract,
   eventExistsInRaw,
   getCheckpointForContract,
+  purgeOrphanedData,
   readRawEventsChunked,
+  resetInternalTables,
   updateCheckpoint,
 } from "./store";
 import { KeplerWsClient } from "./websocket-client";
 
 function log(msg: string) {
   console.log(msg);
+}
+
+/** Resolve handler for an event by exact address:identifier match. */
+function resolveHandler(
+  event: MultiversXEvent,
+  handlers: Record<string, EventHandler>,
+): EventHandler | null {
+  const key = `${event.address}:${event.identifier}`;
+  return handlers[key] ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +116,7 @@ async function phase1Backfill(
       const toLabel = beforeBlock != null ? beforeBlock.toLocaleString() : "latest";
       log(`  │ Block range: ${fromLabel} → ${toLabel}`);
 
-      // --- count events in DB for this contract ---
+      // --- count events in DB by contract address ---
       const eventsInDb = await countRawEventsForContract(db, contract.address);
 
       // --- count remaining on API per event type ---
@@ -161,18 +173,22 @@ async function phase1Backfill(
         if (!useProgressBar || apiRemainingTotal == null) return;
         const elapsed = ((Date.now() - fetchStart) / 1000).toFixed(1);
         const lines: string[] = [];
+        const seenThisRender = new Set<string>();
         for (const evId of contract.eventIdentifiers) {
+          const label = `${addrShort} ${evId}`;
+          if (seenThisRender.has(label)) continue;
+          seenThisRender.add(label);
           const fetched = fetchedByEvent.get(evId) ?? 0;
           const remaining = apiRemainingByEvent.get(evId) ?? 0;
           const pct = remaining > 0 ? Math.min(1, fetched / remaining) : 1;
           const filled = Math.round(barWidth * pct);
           const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
-          const label = evId.padEnd(24).slice(0, 24);
+          const labelPadded = label.padEnd(42).slice(0, 42);
           lines.push(
-            `  │ ${label} [${bar}] ${fetched.toLocaleString()}/~${remaining.toLocaleString()} (${Math.round(pct * 100)}%)`,
+            `  │ ${labelPadded} [${bar}] ${fetched.toLocaleString()}/~${remaining.toLocaleString()} (${Math.round(pct * 100)}%)`,
           );
         }
-        const n = contract.eventIdentifiers.length;
+        const n = lines.length;
         const moveUp = hasRenderedBar && n > 0 ? `\x1b[${n}A\r` : "";
         process.stdout.write(`${moveUp}${lines.join("\n")} — ${elapsed}s\x1b[K`);
         hasRenderedBar = true;
@@ -309,8 +325,7 @@ async function phase2ProcessHandlers(
       };
 
       for (const event of chunk) {
-        const handlerKey = `${event.address}:${event.identifier}`;
-        const handler = config.handlers[handlerKey];
+        const handler = resolveHandler(event, config.handlers);
         if (!handler) continue;
         ctx.sourceId = event.sourceId;
         ctx.client = chainClients.get(event.sourceId) ?? null;
@@ -393,8 +408,7 @@ async function phase3Realtime(
             const insertBuffer = new Map();
             const batchedDb = createBatchedDb(tx as unknown as IndexerDb, insertBuffer);
             for (const event of toProcess) {
-              const handlerKey = `${event.address}:${event.identifier}`;
-              const handler = config.handlers[handlerKey];
+              const handler = resolveHandler(event, config.handlers);
               if (handler) {
                 await handler(event, {
                   db: batchedDb as unknown as IndexerDb,
@@ -446,8 +460,7 @@ async function phase3Realtime(
 
       await batchInsertRawEvents(db, [event]);
 
-      const handlerKey = `${event.address}:${event.identifier}`;
-      const handler = config.handlers[handlerKey];
+      const handler = resolveHandler(event, config.handlers);
       if (handler) {
         await handler(event, {
           db,
@@ -509,6 +522,22 @@ export async function startIndexer(
   const indexerDb = await createDatabase(config.database);
   await bootstrapInternalSchema(indexerDb.db);
 
+  if (config.resetInternalTables) {
+    await resetInternalTables(indexerDb.db);
+    log("  Internal tables reset (raw_events, checkpoint cleared)");
+  } else {
+    const allowedKeys = buildAllowedEventKeys(config.contracts);
+    const { rawEventsDeleted, checkpointsDeleted } = await purgeOrphanedData(
+      indexerDb.db,
+      allowedKeys,
+    );
+    if (rawEventsDeleted > 0 || checkpointsDeleted > 0) {
+      log(
+        `  Config sync: removed ${rawEventsDeleted.toLocaleString()} orphaned raw events, ${checkpointsDeleted} checkpoint(s)`,
+      );
+    }
+  }
+
   setHealthy(true);
 
   const healthServer = config.healthPort
@@ -552,6 +581,22 @@ export async function reindex(config: IndexerConfig, options?: { isDev?: boolean
 
   const indexerDb = await createDatabase(config.database);
   await bootstrapInternalSchema(indexerDb.db);
+
+  if (config.resetInternalTables) {
+    await resetInternalTables(indexerDb.db);
+    log("  Internal tables reset (raw_events, checkpoint cleared)");
+  } else {
+    const allowedKeys = buildAllowedEventKeys(config.contracts);
+    const { rawEventsDeleted, checkpointsDeleted } = await purgeOrphanedData(
+      indexerDb.db,
+      allowedKeys,
+    );
+    if (rawEventsDeleted > 0 || checkpointsDeleted > 0) {
+      log(
+        `  Config sync: removed ${rawEventsDeleted.toLocaleString()} orphaned raw events, ${checkpointsDeleted} checkpoint(s)`,
+      );
+    }
+  }
 
   const chainClients = createChainClientsForConfig(config.sources, indexerDb.db);
 

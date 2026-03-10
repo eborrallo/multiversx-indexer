@@ -68,6 +68,11 @@ export interface IndexerConfig {
   };
   /** Schema for processed (user) tables. Default: project name from package.json (e.g. tao_rewards_tracker). */
   schemaName?: string;
+  /**
+   * When true, clears raw_events and checkpoint tables before starting.
+   * Use for a full re-index from scratch. Default: false.
+   */
+  resetInternalTables?: boolean;
   sources: SourceConfig[];
   contracts: ContractConfig[];
   handlers: Record<string, EventHandler>;

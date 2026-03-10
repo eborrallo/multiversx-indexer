@@ -8,6 +8,7 @@ interface EsLogDoc {
   timestamp: number;
   events: Array<{
     identifier: string;
+    address?: string;
     topics: string[];
     data?: string | null;
     additionalData?: string[];
@@ -178,14 +179,15 @@ export class KeplerEsFetcher {
   ): unknown[] {
     const filters: unknown[] = [];
 
-    const addressFilters = contracts.map((c) => ({
-      term: { address: c.address },
-    }));
-    if (addressFilters.length === 1) {
-      filters.push(addressFilters[0]);
-    } else {
+    const addresses = [...new Set(contracts.map((c) => c.address).filter(Boolean))];
+    if (addresses.length === 1) {
+      filters.push({ term: { "events.address": addresses[0] } });
+    } else if (addresses.length > 1) {
       filters.push({
-        bool: { should: addressFilters, minimum_should_match: 1 },
+        bool: {
+          should: addresses.map((a) => ({ term: { "events.address": a } })),
+          minimum_should_match: 1,
+        },
       });
     }
 
@@ -225,6 +227,7 @@ export class KeplerEsFetcher {
   ): MultiversXEvent[] {
     const events: MultiversXEvent[] = [];
     const eventIdSet = new Set(contracts.flatMap((c) => c.eventIdentifiers));
+    const addressSet = new Set(contracts.map((c) => c.address));
 
     for (const hit of hits) {
       const txHash = hit._id ?? "";
@@ -232,6 +235,9 @@ export class KeplerEsFetcher {
       if (!doc?.events) continue;
 
       doc.events.forEach((ev, i) => {
+        const evAddress = ev.address ?? doc.address;
+        if (evAddress && !addressSet.has(evAddress)) return;
+
         const isMatchByIdentifier = eventIdSet.has(ev.identifier);
         const decodedTopic = ev.topics?.[0] ? base64ToUtf8(ev.topics[0]) : "";
         const isMatchByTopic = eventIdSet.has(decodedTopic);
@@ -245,7 +251,7 @@ export class KeplerEsFetcher {
           sourceId: this.sourceId,
           txHash,
           timestamp: doc.timestamp,
-          address: doc.address,
+          address: evAddress ?? doc.address,
           identifier,
           topics: ev.topics ?? [],
           data: ev.data ?? null,

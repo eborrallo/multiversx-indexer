@@ -2,7 +2,7 @@ import { and, asc, count, eq, inArray, sql } from "drizzle-orm";
 import { RAW_BATCH_SIZE } from "../constants";
 import { multiverseCheckpoint, multiverseRawEvents } from "../schema/internal";
 import type { MultiversXEvent } from "../schema/types";
-import type { IndexerDb } from "./db";
+import { INTERNAL_SCHEMA, type IndexerDb } from "./db";
 
 export function eventToRow(event: MultiversXEvent) {
   return {
@@ -186,6 +186,27 @@ export async function countRawEventsForContractAndEvent(
 }
 
 /**
+ * Count raw events for (sourceId, eventIdentifiers) regardless of contract address.
+ */
+export async function countRawEventsForSourceAndEventIdentifiers(
+  db: IndexerDb,
+  sourceId: string,
+  eventIdentifiers: string[],
+): Promise<number> {
+  if (eventIdentifiers.length === 0) return 0;
+  const result = await db
+    .select({ total: count() })
+    .from(multiverseRawEvents)
+    .where(
+      and(
+        eq(multiverseRawEvents.sourceId, sourceId),
+        inArray(multiverseRawEvents.eventIdentifier, eventIdentifiers),
+      ),
+    );
+  return result[0]?.total ?? 0;
+}
+
+/**
  * Cursor for keyset pagination. Uses (blockTimestamp, txHash, eventIndex) to avoid OFFSET.
  */
 type Cursor = { blockTimestamp: number; txHash: string; eventIndex: number };
@@ -244,4 +265,109 @@ export async function eventExistsInRaw(db: IndexerDb, eventId: string): Promise<
     .where(eq(multiverseRawEvents.id, eventId))
     .limit(1);
   return result.length > 0;
+}
+
+/** Key for allowed (sourceId, contractAddress, eventIdentifier) from config. */
+export type AllowedEventKey = {
+  sourceId: string;
+  contractAddress: string;
+  eventIdentifier: string;
+};
+
+/**
+ * Build allowed keys from config contracts. Each (sourceId, contractAddress, eventIdentifier)
+ * that appears in config is kept; all others are considered orphaned.
+ */
+export function buildAllowedEventKeys(
+  contracts: Array<{
+    sourceId: string;
+    address: string;
+    eventIdentifiers: string[];
+  }>,
+): AllowedEventKey[] {
+  const keys: AllowedEventKey[] = [];
+  for (const c of contracts) {
+    for (const evId of c.eventIdentifiers) {
+      keys.push({ sourceId: c.sourceId, contractAddress: c.address, eventIdentifier: evId });
+    }
+  }
+  return keys;
+}
+
+/**
+ * Purge raw events and checkpoints that are not in the allowed set (config).
+ * Call when config changes (e.g. contract or event identifier removed).
+ */
+export async function purgeOrphanedData(
+  db: IndexerDb,
+  allowedKeys: AllowedEventKey[],
+): Promise<{ rawEventsDeleted: number; checkpointsDeleted: number }> {
+  const allowedSet = new Set(
+    allowedKeys.map((k) => `${k.sourceId}|${k.contractAddress}|${k.eventIdentifier}`),
+  );
+  const keyStr = (s: string, c: string, e: string) => `${s}|${c}|${e}`;
+  const isAllowed = (s: string, c: string, e: string) => allowedSet.has(keyStr(s, c, e));
+
+  let checkpointsDeleted = 0;
+  const checkpointRows = await db.select().from(multiverseCheckpoint);
+  for (const row of checkpointRows) {
+    if (!isAllowed(row.sourceId, row.contractAddress, row.eventIdentifier)) {
+      await db
+        .delete(multiverseCheckpoint)
+        .where(
+          and(
+            eq(multiverseCheckpoint.sourceId, row.sourceId),
+            eq(multiverseCheckpoint.contractAddress, row.contractAddress),
+            eq(multiverseCheckpoint.eventIdentifier, row.eventIdentifier),
+          ),
+        );
+      checkpointsDeleted++;
+    }
+  }
+
+  const distinctRaw = await db
+    .selectDistinct({
+      sourceId: multiverseRawEvents.sourceId,
+      contractAddress: multiverseRawEvents.contractAddress,
+      eventIdentifier: multiverseRawEvents.eventIdentifier,
+    })
+    .from(multiverseRawEvents);
+
+  let rawEventsDeleted = 0;
+  for (const row of distinctRaw) {
+    if (!isAllowed(row.sourceId, row.contractAddress, row.eventIdentifier)) {
+      const countResult = await db
+        .select({ n: count() })
+        .from(multiverseRawEvents)
+        .where(
+          and(
+            eq(multiverseRawEvents.sourceId, row.sourceId),
+            eq(multiverseRawEvents.contractAddress, row.contractAddress),
+            eq(multiverseRawEvents.eventIdentifier, row.eventIdentifier),
+          ),
+        );
+      const n = countResult[0]?.n ?? 0;
+      await db
+        .delete(multiverseRawEvents)
+        .where(
+          and(
+            eq(multiverseRawEvents.sourceId, row.sourceId),
+            eq(multiverseRawEvents.contractAddress, row.contractAddress),
+            eq(multiverseRawEvents.eventIdentifier, row.eventIdentifier),
+          ),
+        );
+      rawEventsDeleted += n;
+    }
+  }
+
+  return { rawEventsDeleted, checkpointsDeleted };
+}
+
+/**
+ * Clear raw_events and checkpoint tables. Use when resetInternalTables is true.
+ */
+export async function resetInternalTables(db: IndexerDb): Promise<void> {
+  const s = INTERNAL_SCHEMA;
+  await db.execute(sql.raw(`TRUNCATE TABLE "${s}"."_multiverse_raw_events"`));
+  await db.execute(sql.raw(`TRUNCATE TABLE "${s}"."_multiverse_checkpoint"`));
 }

@@ -60,24 +60,28 @@ export function createBatchedDb(
     get(target, prop) {
       if (prop === "insert") {
         return (table: Table) => ({
-          values: (rowOrRows: Record<string, unknown> | Record<string, unknown>[]) => ({
-            onConflictDoNothing: () => {
-              const rows = Array.isArray(rowOrRows) ? rowOrRows : [rowOrRows];
-              const entry = buffer.get(table);
-              if (entry) {
-                entry.rows.push(...rows);
-              } else {
-                buffer.set(table, { rows: [...rows], strategy: "doNothing" });
-              }
-              return Promise.resolve(undefined);
-            },
-            onConflictDoUpdate: (opts: { target: unknown; set: Record<string, unknown> }) => {
-              return (realDb as IndexerDb)
-                .insert(table as never)
-                .values(rowOrRows as never)
-                .onConflictDoUpdate(opts as never);
-            },
-          }),
+          values: (rowOrRows: Record<string, unknown> | Record<string, unknown>[]) => {
+            const plainInsert = () =>
+              (realDb as IndexerDb).insert(table as never).values(rowOrRows as never);
+            return {
+              onConflictDoNothing: () => {
+                const rows = Array.isArray(rowOrRows) ? rowOrRows : [rowOrRows];
+                const entry = buffer.get(table);
+                if (entry) {
+                  entry.rows.push(...rows);
+                } else {
+                  buffer.set(table, { rows: [...rows], strategy: "doNothing" });
+                }
+                return Promise.resolve(undefined);
+              },
+              onConflictDoUpdate: (opts: { target: unknown; set: Record<string, unknown> }) => {
+                return plainInsert().onConflictDoUpdate(opts as never);
+              },
+              // biome-ignore lint/suspicious/noThenProperty: Intentional thenable for await db.insert().values()
+              then: (onFulfilled?: (v: unknown) => unknown, onRejected?: (e: unknown) => unknown) =>
+                plainInsert().then(onFulfilled, onRejected),
+            };
+          },
         });
       }
       if (prop === INSERT_BUFFER) return buffer;

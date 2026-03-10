@@ -378,4 +378,97 @@ describe("Reindex (pipeline phase 2)", () => {
       rmSync("./test-reindex-data", { recursive: true, force: true });
     } catch {}
   });
+
+  test("replays mixed handlers: plain insert + onConflictDoNothing", async () => {
+    const dataDir = "./test-reindex-mixed-data";
+    const client = new PGlite(dataDir);
+    openClients.push(client);
+    const db = drizzle(client) as unknown as IndexerDb;
+    await bootstrapInternalSchema(db);
+
+    const events = [
+      makeEvent({
+        id: "s:tx1:0",
+        txHash: "tx1",
+        timestamp: 1000,
+        identifier: "accrue",
+        address: "c1",
+        eventIndex: 0,
+      }),
+      makeEvent({
+        id: "s:tx1:1",
+        txHash: "tx1",
+        timestamp: 1000,
+        identifier: "add",
+        address: "c1",
+        eventIndex: 1,
+      }),
+      makeEvent({
+        id: "s:tx2:0",
+        txHash: "tx2",
+        timestamp: 2000,
+        identifier: "accrue",
+        address: "c1",
+        eventIndex: 0,
+      }),
+      makeEvent({
+        id: "s:tx2:1",
+        txHash: "tx2",
+        timestamp: 2000,
+        identifier: "add",
+        address: "c1",
+        eventIndex: 1,
+      }),
+    ];
+    await batchInsertRawEvents(db, events);
+    await client.close();
+
+    const config = defineConfig({
+      database: { dataDir },
+      schemaName: testSchemaName,
+      sources: [{ id: "test_src", type: "kepler", apiKey: "test" }],
+      contracts: [
+        {
+          sourceId: "test_src",
+          address: "c1",
+          eventIdentifiers: ["accrue", "add"],
+        },
+      ],
+      schema: { testTable },
+      handlers: {
+        "c1:accrue": async (event, ctx) => {
+          const table = ctx.schema.testTable as typeof testTable;
+          await ctx.db.insert(table).values({ id: event.id, value: event.txHash });
+        },
+        "c1:add": async (event, ctx) => {
+          const table = ctx.schema.testTable as typeof testTable;
+          await ctx.db
+            .insert(table)
+            .values({ id: event.id, value: event.txHash })
+            .onConflictDoNothing();
+        },
+      },
+    });
+
+    await reindex(config);
+
+    const client2 = new PGlite(dataDir);
+    openClients.push(client2);
+    const db2 = drizzle(client2) as unknown as IndexerDb;
+    const result = (await db2.execute(
+      sql.raw(`SELECT id, value FROM "${testSchemaName}"."test_output" ORDER BY id`),
+    )) as { rows: { id: string; value: string }[] };
+    expect(result.rows.length).toBe(4);
+    const ids = result.rows.map((r) => r.id);
+    expect(ids).toContain("s:tx1:0");
+    expect(ids).toContain("s:tx1:1");
+    expect(ids).toContain("s:tx2:0");
+    expect(ids).toContain("s:tx2:1");
+    await client2.close();
+
+    const { rmSync } = await import("node:fs");
+    try {
+      rmSync(dataDir, { recursive: true, force: true });
+    } catch {}
+  });
 });
