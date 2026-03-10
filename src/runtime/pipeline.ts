@@ -18,10 +18,12 @@ import { addProcessed, setHealthy, setPhase, setReady, startHealthServer } from 
 import { syncUserSchema } from "./schema-sync";
 import {
   batchInsertRawEvents,
+  buildAllowedEventKeys,
   countRawEvents,
   countRawEventsForContract,
   eventExistsInRaw,
   getCheckpointForContract,
+  purgeOrphanedData,
   readRawEventsChunked,
   updateCheckpoint,
 } from "./store";
@@ -157,22 +159,26 @@ async function phase1Backfill(
       const barWidth = 20;
 
       let hasRenderedBar = false;
+      const seenLabels = new Set<string>();
       function renderBackfillBar() {
         if (!useProgressBar || apiRemainingTotal == null) return;
         const elapsed = ((Date.now() - fetchStart) / 1000).toFixed(1);
         const lines: string[] = [];
         for (const evId of contract.eventIdentifiers) {
+          const label = `${addrShort} ${evId}`;
+          if (seenLabels.has(label)) continue;
+          seenLabels.add(label);
           const fetched = fetchedByEvent.get(evId) ?? 0;
           const remaining = apiRemainingByEvent.get(evId) ?? 0;
           const pct = remaining > 0 ? Math.min(1, fetched / remaining) : 1;
           const filled = Math.round(barWidth * pct);
           const bar = "█".repeat(filled) + "░".repeat(barWidth - filled);
-          const label = evId.padEnd(24).slice(0, 24);
+          const labelPadded = label.padEnd(42).slice(0, 42);
           lines.push(
-            `  │ ${label} [${bar}] ${fetched.toLocaleString()}/~${remaining.toLocaleString()} (${Math.round(pct * 100)}%)`,
+            `  │ ${labelPadded} [${bar}] ${fetched.toLocaleString()}/~${remaining.toLocaleString()} (${Math.round(pct * 100)}%)`,
           );
         }
-        const n = contract.eventIdentifiers.length;
+        const n = lines.length;
         const moveUp = hasRenderedBar && n > 0 ? `\x1b[${n}A\r` : "";
         process.stdout.write(`${moveUp}${lines.join("\n")} — ${elapsed}s\x1b[K`);
         hasRenderedBar = true;
@@ -509,6 +515,17 @@ export async function startIndexer(
   const indexerDb = await createDatabase(config.database);
   await bootstrapInternalSchema(indexerDb.db);
 
+  const allowedKeys = buildAllowedEventKeys(config.contracts);
+  const { rawEventsDeleted, checkpointsDeleted } = await purgeOrphanedData(
+    indexerDb.db,
+    allowedKeys,
+  );
+  if (rawEventsDeleted > 0 || checkpointsDeleted > 0) {
+    log(
+      `  Config sync: removed ${rawEventsDeleted.toLocaleString()} orphaned raw events, ${checkpointsDeleted} checkpoint(s)`,
+    );
+  }
+
   setHealthy(true);
 
   const healthServer = config.healthPort
@@ -552,6 +569,17 @@ export async function reindex(config: IndexerConfig, options?: { isDev?: boolean
 
   const indexerDb = await createDatabase(config.database);
   await bootstrapInternalSchema(indexerDb.db);
+
+  const allowedKeys = buildAllowedEventKeys(config.contracts);
+  const { rawEventsDeleted, checkpointsDeleted } = await purgeOrphanedData(
+    indexerDb.db,
+    allowedKeys,
+  );
+  if (rawEventsDeleted > 0 || checkpointsDeleted > 0) {
+    log(
+      `  Config sync: removed ${rawEventsDeleted.toLocaleString()} orphaned raw events, ${checkpointsDeleted} checkpoint(s)`,
+    );
+  }
 
   const chainClients = createChainClientsForConfig(config.sources, indexerDb.db);
 

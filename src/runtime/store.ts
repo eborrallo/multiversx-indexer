@@ -245,3 +245,95 @@ export async function eventExistsInRaw(db: IndexerDb, eventId: string): Promise<
     .limit(1);
   return result.length > 0;
 }
+
+/** Key for allowed (sourceId, contractAddress, eventIdentifier) from config. */
+export type AllowedEventKey = {
+  sourceId: string;
+  contractAddress: string;
+  eventIdentifier: string;
+};
+
+/**
+ * Build allowed keys from config contracts. Each (sourceId, contractAddress, eventIdentifier)
+ * that appears in config is kept; all others are considered orphaned.
+ */
+export function buildAllowedEventKeys(
+  contracts: Array<{ sourceId: string; address: string; eventIdentifiers: string[] }>,
+): AllowedEventKey[] {
+  const keys: AllowedEventKey[] = [];
+  for (const c of contracts) {
+    for (const evId of c.eventIdentifiers) {
+      keys.push({ sourceId: c.sourceId, contractAddress: c.address, eventIdentifier: evId });
+    }
+  }
+  return keys;
+}
+
+/**
+ * Purge raw events and checkpoints that are not in the allowed set (config).
+ * Call when config changes (e.g. contract or event identifier removed).
+ */
+export async function purgeOrphanedData(
+  db: IndexerDb,
+  allowedKeys: AllowedEventKey[],
+): Promise<{ rawEventsDeleted: number; checkpointsDeleted: number }> {
+  const allowedSet = new Set(
+    allowedKeys.map((k) => `${k.sourceId}|${k.contractAddress}|${k.eventIdentifier}`),
+  );
+
+  const keyStr = (s: string, c: string, e: string) => `${s}|${c}|${e}`;
+
+  let checkpointsDeleted = 0;
+  const checkpointRows = await db.select().from(multiverseCheckpoint);
+  for (const row of checkpointRows) {
+    if (!allowedSet.has(keyStr(row.sourceId, row.contractAddress, row.eventIdentifier))) {
+      await db
+        .delete(multiverseCheckpoint)
+        .where(
+          and(
+            eq(multiverseCheckpoint.sourceId, row.sourceId),
+            eq(multiverseCheckpoint.contractAddress, row.contractAddress),
+            eq(multiverseCheckpoint.eventIdentifier, row.eventIdentifier),
+          ),
+        );
+      checkpointsDeleted++;
+    }
+  }
+
+  const distinctRaw = await db
+    .selectDistinct({
+      sourceId: multiverseRawEvents.sourceId,
+      contractAddress: multiverseRawEvents.contractAddress,
+      eventIdentifier: multiverseRawEvents.eventIdentifier,
+    })
+    .from(multiverseRawEvents);
+
+  let rawEventsDeleted = 0;
+  for (const row of distinctRaw) {
+    if (!allowedSet.has(keyStr(row.sourceId, row.contractAddress, row.eventIdentifier))) {
+      const countResult = await db
+        .select({ n: count() })
+        .from(multiverseRawEvents)
+        .where(
+          and(
+            eq(multiverseRawEvents.sourceId, row.sourceId),
+            eq(multiverseRawEvents.contractAddress, row.contractAddress),
+            eq(multiverseRawEvents.eventIdentifier, row.eventIdentifier),
+          ),
+        );
+      const n = countResult[0]?.n ?? 0;
+      await db
+        .delete(multiverseRawEvents)
+        .where(
+          and(
+            eq(multiverseRawEvents.sourceId, row.sourceId),
+            eq(multiverseRawEvents.contractAddress, row.contractAddress),
+            eq(multiverseRawEvents.eventIdentifier, row.eventIdentifier),
+          ),
+        );
+      rawEventsDeleted += n;
+    }
+  }
+
+  return { rawEventsDeleted, checkpointsDeleted };
+}

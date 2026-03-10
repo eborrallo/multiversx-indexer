@@ -12,11 +12,13 @@ import {
 } from "./db";
 import {
   batchInsertRawEvents,
+  buildAllowedEventKeys,
   countRawEvents,
   countRawEventsForContract,
   eventExistsInRaw,
   getCheckpoint,
   getCheckpointForContract,
+  purgeOrphanedData,
   readRawEventsChunked,
   updateCheckpoint,
 } from "./store";
@@ -447,6 +449,30 @@ describe("db client read validation", () => {
     expect(chunks[0]).toHaveLength(2);
     expect(chunks[1]).toHaveLength(2);
     expect(chunks[2]).toHaveLength(1);
+  });
+
+  test("purgeOrphanedData removes raw events and checkpoints not in config", async () => {
+    await batchInsertRawEvents(db, [
+      makeEvent({ id: "s:tx1:0", sourceId: "src1", address: "erd1a", identifier: "EventA" }),
+      makeEvent({ id: "s:tx2:0", sourceId: "src1", address: "erd1a", identifier: "EventB" }),
+      makeEvent({ id: "s:tx3:0", sourceId: "src1", address: "erd1b", identifier: "EventA" }),
+    ]);
+    await updateCheckpoint(db, "src1", "erd1a", ["EventA", "EventB"], "tx2", 2000, null);
+    await updateCheckpoint(db, "src1", "erd1b", ["EventA"], "tx3", 3000, null);
+
+    const allowedKeys = buildAllowedEventKeys([
+      { sourceId: "src1", address: "erd1a", eventIdentifiers: ["EventA"] },
+    ]);
+    const { rawEventsDeleted, checkpointsDeleted } = await purgeOrphanedData(db, allowedKeys);
+
+    expect(rawEventsDeleted).toBe(2);
+    expect(checkpointsDeleted).toBe(2);
+    expect(await countRawEvents(db)).toBe(1);
+    expect(await countRawEventsForContract(db, "erd1a")).toBe(1);
+    expect(await countRawEventsForContract(db, "erd1b")).toBe(0);
+    const cp = await getCheckpointForContract(db, "src1", "erd1a", ["EventA"]);
+    expect(cp).not.toBeNull();
+    expect(cp?.lastTxHash).toBe("tx2");
   });
 
   test("readRawEventsChunked filters by sourceId", async () => {

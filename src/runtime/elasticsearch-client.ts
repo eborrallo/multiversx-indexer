@@ -178,16 +178,17 @@ export class KeplerEsFetcher {
   ): unknown[] {
     const filters: unknown[] = [];
 
-    const addressFilters = contracts.map((c) => ({
-      term: { address: c.address },
-    }));
-    if (addressFilters.length === 1) {
-      filters.push(addressFilters[0]);
-    } else {
-      filters.push({
-        bool: { should: addressFilters, minimum_should_match: 1 },
-      });
-    }
+    // Address filter removed for testing — keep only event topic
+    // const addressFilters = contracts.map((c) => ({
+    //   term: { address: c.address },
+    // }));
+    // if (addressFilters.length === 1) {
+    //   filters.push(addressFilters[0]);
+    // } else {
+    //   filters.push({
+    //     bool: { should: addressFilters, minimum_should_match: 1 },
+    //   });
+    // }
 
     const topicFilters = contracts.flatMap((c) =>
       c.eventIdentifiers.map((id) => ({
